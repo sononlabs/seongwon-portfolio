@@ -265,6 +265,7 @@ section { position: relative; padding: 120px 0; }
 @media (max-width: 860px) { .proj-grid { grid-template-columns: 1fr; } }
 
 .proj-card {
+  display: block;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -304,18 +305,42 @@ section { position: relative; padding: 120px 0; }
 .tag.console { color: var(--tag-console); }
 .tag.service { color: var(--tag-service); }
 
-.proj-detail {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.4s var(--ease);
+.proj-teaser { margin-top: 14px; font-size: 13.5px; color: var(--text-dim); line-height: 1.55; }
+.proj-more {
+  margin-top: 18px; display: flex; align-items: center; gap: 6px;
+  font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-faint);
+  transition: color 0.2s, gap 0.2s;
 }
-.proj-card.is-open .proj-detail { max-height: 400px; }
-.proj-card.is-open .proj-detail.has-gallery { max-height: 5200px; }
-.proj-detail-inner { padding: 0 24px 24px; border-top: 1px solid var(--border); margin-top: 18px; padding-top: 18px; }
-.proj-detail-inner h5 { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
-.proj-detail-inner p { font-size: 14px; color: var(--text-dim); margin-bottom: 16px; }
-.proj-detail-inner a.link-out { font-size: 13px; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
-.proj-toggle { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-faint); margin-top: 14px; display: block; }
+.proj-card:hover .proj-more { color: var(--accent); gap: 10px; }
+
+.link-out { font-size: 13px; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
+
+/* ===== Case study detail page ===== */
+.case-hero { padding-top: 140px; padding-bottom: 0; }
+.back-link {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: "JetBrains Mono", monospace; font-size: 12.5px; color: var(--text-faint);
+  margin-bottom: 36px; transition: color 0.2s;
+}
+.back-link:hover { color: var(--accent); }
+.case-hero-top { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap; margin-bottom: 36px; }
+.case-hero-top h1 { font-size: clamp(32px, 5vw, 52px); font-weight: 700; letter-spacing: -0.01em; }
+.case-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+.case-period { font-family: "JetBrains Mono", monospace; font-size: 13px; color: var(--text-faint); }
+.case-tags { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.case-cover { width: 100%; border-radius: var(--radius-lg); border: 1px solid var(--border); margin-top: 36px; }
+.case-body { padding-top: 56px; }
+.case-text { max-width: 720px; }
+.case-text h5 { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; margin-top: 28px; }
+.case-text h5:first-child { margin-top: 0; }
+.case-text p { font-size: 15px; color: var(--text-dim); line-height: 1.65; }
+.case-text .award-line { margin-top: 16px; font-size: 14px; color: var(--tag-ai); }
+.case-text .link-out { margin-top: 20px; }
+.case-gallery.has-top-gap { margin-top: 56px; padding-top: 48px; border-top: 1px solid var(--border); }
+.case-gallery-label {
+  font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 20px; display: block;
+}
 
 /* ===== Case study gallery (Figma UI 발췌) ===== */
 .case-gallery { display: flex; flex-direction: column; gap: 22px; margin: 6px 0 20px; }

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>워록2 메버릭 — 이성원 포트폴리오</title>
+<meta name="description" content="대규모 현대전 FPS 워록2의 UI Design Lead로서 기획·GUI·인터랙션 전 과정을 담당한 프로젝트." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+<link rel="stylesheet" href="../css/style.css" />
+</head>
+<body>
+<div class="bg-grid"></div>
+
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a href="../index.html" class="nav-brand"><span class="dot"></span>SEONGWON LEE</a>
+    <div class="nav-links">
+      <a href="../index.html#about">About</a>
+      <a href="../index.html#experience">Experience</a>
+      <a href="../index.html#work">Work</a>
+      <a href="../index.html#awards">Awards</a>
+    </div>
+    <a href="../index.html#contact" class="nav-cta">Contact</a>
+  </div>
+</nav>
+
+<header class="case-hero wrap">
+  <a class="back-link mono" href="../index.html#work">← Work로 돌아가기</a>
+  <div class="case-hero-top">
+    <h1>워록2 메버릭</h1>
+    <div class="case-meta">
+      <div class="case-period mono">2024.10~</div>
+      <div class="case-tags"><span class="tag gui">GUI-DESIGN</span><span class="tag ux">UMG</span><span class="tag proto">PROTOTYPING</span></div>
+    </div>
+  </div>
+  <img class="case-cover" src="../assets/img/warrock2_cover.jpg" alt="워록2 타이틀/오버뷰 화면">
+</header>
+
+<section class="case-body wrap">
+  <div class="case-text">
+    <h5>Background</h5>
+    <p>워록1의 후속작으로, 대규모 전장 모드 Warfare와 전술 모드 TacticalOps 두 가지 플레이 경험을 제공하는 FPS입니다. 사내 1인 UI 디자이너로서 로그인·런처부터 로비, 인벤토리·퍽·차량 커스터마이징, 전투 중 HUD·맵, 퀘스트·보상, 탑승 기종별 계기판, Steam 스토어 마케팅 목업까지 — 유저가 마주치는 거의 모든 화면을 설계했습니다.</p>
+    <h5>Role &amp; Result</h5>
+    <p>UI Design Lead로 게임 전체 UX 사용성을 개선하고, Unreal Material·애니메이션을 활용한 UI 연출을 주도했습니다. 와이어프레임 단계부터 AS-IS/TO-BE 비교를 통한 반복 개선, 최종 마케팅 자산까지 디자인 전 과정(A-Z)을 담당했습니다.</p>
+    <p class="award-line">🏆 튀르키예 ‘바이트사’ 투자유치</p>
+    <a class="link-out" href="https://store.steampowered.com/app/2883390/WARROCK2/" target="_blank" rel="noopener">Steam 페이지 →</a>
+  </div>
+
+  <div class="case-gallery has-top-gap">
+    <span class="case-gallery-label">Design Process</span>
+    <figure>
+      <img src="../assets/img/warrock2_launcher.jpg" alt="워록2 런처·로그인 UI" loading="lazy">
+      <figcaption><span class="cap-label">Launcher &amp; Login</span>로그인부터 플레이 버튼까지 이어지는 런처 플로우. 계정 전환·서버 선택 드롭다운까지 하나의 화면 흐름으로 설계했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_modeselect.jpg" alt="워록2 모드 선택 UI, Warfare와 TacticalOps 비교" loading="lazy">
+      <figcaption><span class="cap-label">Mode Select</span>Warfare(대규모 전장)와 TacticalOps(전술 모드) 두 플레이 모드를 큰 비주얼 카드로 비교해 고를 수 있게 한 모드 선택 화면입니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_lobby.jpg" alt="워록2 로비 UI" loading="lazy">
+      <figcaption><span class="cap-label">Lobby</span>모든 메뉴가 펼쳐져도 서로 겹치지 않도록 공간을 분배하고, 펼친 메뉴가 자동으로 닫히는 아코디언 구조로 공간 효율을 높였습니다. 매칭 대기 중에도 조작·탭 전환이 가능하도록 인터렉션을 하단에 배치해 대기 시간을 몰입감 있는 경험으로 전환, 이탈을 방지했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_inventory.jpg" alt="워록2 인벤토리 UI" loading="lazy">
+      <figcaption><span class="cap-label">Inventory</span>단순 수납공간이 아니라 무게·가치·리스크를 즉각 시각화해 "지금 뭘 챙기고 버릴지"를 빠르게 결정하게 하는 구조. 부위별 부상 상태에 맞는 소모품 사용, 차량의 연료·적재량 표시까지 함께 설계했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_perk.jpg" alt="워록2 퍽 인벤토리 UI" loading="lazy">
+      <figcaption><span class="cap-label">Perk</span>장비 강화용 퍽(Perk) 아이템을 필터링·정렬해 관리하는 서브 인벤토리 시스템. 메인 인벤토리와 분리해 정보 과잉을 피했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_vehicle.jpg" alt="워록2 차량 커스터마이징 UI" loading="lazy">
+      <figcaption><span class="cap-label">Vehicle Customization</span>병과 로드아웃과 별개로 탑승 차량의 외형·성능 커스터마이징을 독립된 탭으로 분리해 설계했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_class.jpg" alt="워록2 병과 선택 UI AS-IS TO-BE 비교" loading="lazy">
+      <figcaption><span class="cap-label">Class UI · AS-IS → TO-BE</span>병과 선택을 탭 구조로 재구성하고 단축키를 부여해 조작 편의성을 높였습니다. 병과명과 아이콘을 크게 강조해 병과 간 인지도를 강화했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_weapon.jpg" alt="워록2 무기 커스터마이징 UI AS-IS TO-BE 비교" loading="lazy">
+      <figcaption><span class="cap-label">Weapon Customization · AS-IS → TO-BE</span>AS-IS는 총기 파츠 구조와 리스트 버튼의 디자인이 비슷해 계층 구조가 잘 인지되지 않는 문제가 있었습니다. TO-BE는 뎁스를 나눠 파츠 위치를 직관적으로 보여주고, 썸네일 비율에 맞춰 리스트를 가로형에서 세로형으로 바꿔 파츠 교체 연출을 더 부각했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_challenge.jpg" alt="워록2 퀘스트 및 보상 UI" loading="lazy">
+      <figcaption><span class="cap-label">Challenge &amp; Reward</span>퀘스트 리스트와 보상 수령 UI. 진행도 게이지와 보상 카드를 한 화면에서 확인·수령할 수 있도록 구성했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_map.jpg" alt="워록2 맵 UI, 익스트랙션 모드와 컨퀘스트 모드 비교" loading="lazy">
+      <figcaption><span class="cap-label">Map UI</span>Extraction 모드는 타임라인별 태스크를 색상으로 구분해 다음 미션을 직관적으로 인지하도록 설계했습니다. Conquest·TDM 모드는 경기 구역과 건물·야외의 화이트 투명도에 차이를 둬 지형·위치 정보를 더 잘 읽히게 해, 맵을 전략적 활용 도구로 쓸 수 있게 했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_hud.jpg" alt="워록2 HUD UI, 모드별 정보 구성 비교" loading="lazy">
+      <figcaption><span class="cap-label">HUD · 모드별 정보 설계</span>Extraction 모드는 생존·축적·탈출 중심이라 자기 상태·소음·수납/무게·자원 소진율 같은 미시적 정보를 중심으로 설계했습니다. Conquest·TDM 모드는 영역 점령과 동시다발 교전이 핵심이라 팀 상황·거점 상태·교전 방향성 같은 거시적 정보를 중심으로 설계했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_instrument.jpg" alt="워록2 탑승 기종별 계기판 HUD" loading="lazy">
+      <figcaption><span class="cap-label">Instrument Cluster</span>탑승 기종(A10 / UH60 / AH6)마다 다른 정보 구조를 가진 계기판 HUD. 기체별 특성에 맞춰 디테일까지 따로 설계했습니다.</figcaption>
+    </figure>
+    <figure>
+      <img src="../assets/img/warrock2_steampage.jpg" alt="워록2 Steam 스토어 페이지 마케팅 목업" loading="lazy">
+      <figcaption><span class="cap-label">Steam Store Page</span>게임 내 UI뿐 아니라 캡슐 이미지·스크린샷 레이아웃 등 Steam 스토어 페이지 마케팅 목업까지 직접 제작했습니다.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<footer>© 2026 SEONGWON LEE — DESIGNED &amp; BUILT FOR CHRONOSTUDIO PORTFOLIO</footer>
+
+<script src="../js/main.js"></script>
+</body>
+</html>
