@@ -310,11 +310,25 @@ section { position: relative; padding: 120px 0; }
   transition: max-height 0.4s var(--ease);
 }
 .proj-card.is-open .proj-detail { max-height: 400px; }
+.proj-card.is-open .proj-detail.has-gallery { max-height: 5200px; }
 .proj-detail-inner { padding: 0 24px 24px; border-top: 1px solid var(--border); margin-top: 18px; padding-top: 18px; }
 .proj-detail-inner h5 { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
 .proj-detail-inner p { font-size: 14px; color: var(--text-dim); margin-bottom: 16px; }
 .proj-detail-inner a.link-out { font-size: 13px; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
 .proj-toggle { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-faint); margin-top: 14px; display: block; }
+
+/* ===== Case study gallery (Figma UI 발췌) ===== */
+.case-gallery { display: flex; flex-direction: column; gap: 22px; margin: 6px 0 20px; }
+.case-gallery figure { margin: 0; }
+.case-gallery img {
+  width: 100%; display: block; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-elev);
+}
+.case-gallery figcaption { margin-top: 10px; font-size: 13px; color: var(--text-dim); line-height: 1.55; }
+.case-gallery figcaption .cap-label {
+  display: block; font-family: "JetBrains Mono", monospace; font-size: 10.5px;
+  color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;
+}
 
 /* ===== Awards ===== */
 .award-list { display: flex; flex-direction: column; }
