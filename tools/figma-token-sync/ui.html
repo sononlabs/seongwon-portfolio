@@ -1,0 +1,219 @@
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 12px; font: 12px/1.5 Inter, system-ui, sans-serif; color: var(--figma-color-text); background: var(--figma-color-bg); }
+  h1 { font-size: 13px; margin: 0 0 8px; }
+  .status { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 6px; background: var(--figma-color-bg-secondary); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--figma-color-icon-tertiary); flex: none; }
+  .dot.ok { background: var(--figma-color-bg-success); }
+  .dot.err { background: var(--figma-color-bg-danger); }
+  .row { display: flex; justify-content: space-between; align-items: center; margin: 10px 0 6px; }
+  .muted { color: var(--figma-color-text-secondary); }
+  .box { border: 1px solid var(--figma-color-border); border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
+  .box ul { margin: 4px 0 8px; padding-left: 16px; }
+  .box code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; }
+  button { font: inherit; padding: 5px 8px; border-radius: 5px; border: 1px solid var(--figma-color-border); background: var(--figma-color-bg); color: var(--figma-color-text); cursor: pointer; }
+  button.primary { background: var(--figma-color-bg-brand); color: var(--figma-color-text-onbrand); border-color: transparent; }
+  ol { list-style: none; margin: 0; padding: 0; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; }
+  ol li { padding: 3px 0; border-bottom: 1px solid var(--figma-color-border); word-break: break-all; }
+</style>
+
+<h1>Token Sync</h1>
+<div class="status"><span class="dot" id="dot"></span><span id="status">연결 중…</span></div>
+<div class="row">
+  <label><input type="checkbox" id="pause"> 일시정지</label>
+  <span class="muted" id="count"></span>
+</div>
+
+<div class="box" id="conflicts" hidden>
+  <strong>값이 서로 다른 토큰</strong>
+  <ul id="conflictList"></ul>
+  <button class="primary" data-use="figma">피그마 값으로 코드 맞추기</button>
+  <button data-use="code">코드 값으로 피그마 맞추기</button>
+</div>
+
+<div class="box muted" id="unmatched" hidden></div>
+
+<div class="row"><strong>기록</strong></div>
+<ol id="log"></ol>
+
+<script>
+const SERVER = 'http://localhost:7788';
+const INTERVAL = 800;
+
+// <convert>
+const clamp255 = (x) => Math.max(0, Math.min(255, Math.round(x * 255)));
+const fmtNum = (n, d) => String(+n.toFixed(d));
+
+function parseColor(s) {
+  s = s.trim().toLowerCase();
+  let m = s.match(/^#([0-9a-f]{3,8})$/);
+  if (m) {
+    let h = m[1];
+    if (h.length === 3 || h.length === 4) h = [...h].map((c) => c + c).join('');
+    if (h.length !== 6 && h.length !== 8) return null;
+    const n = (i) => parseInt(h.slice(i, i + 2), 16) / 255;
+    return { r: n(0), g: n(2), b: n(4), a: h.length === 8 ? n(6) : 1 };
+  }
+  m = s.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,/]\s*([\d.]+%?)\s*)?\)$/);
+  if (m) {
+    const a = m[4] === undefined ? 1 : m[4].endsWith('%') ? parseFloat(m[4]) / 100 : parseFloat(m[4]);
+    return { r: +m[1] / 255, g: +m[2] / 255, b: +m[3] / 255, a };
+  }
+  return null;
+}
+
+function figmaToCss(type, v) {
+  if (type === 'FLOAT') return fmtNum(v, 2) + 'px';
+  const [r, g, b] = [v.r, v.g, v.b].map(clamp255);
+  const a = v.a === undefined ? 1 : v.a;
+  if (a >= 0.9995) return '#' + [r, g, b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return `rgba(${r}, ${g}, ${b}, ${fmtNum(a, 3)})`;
+}
+
+function cssToFigma(type, s) {
+  if (type === 'FLOAT') { const m = s.trim().match(/^(-?\d*\.?\d+)px$/); return m ? parseFloat(m[1]) : null; }
+  return parseColor(s);
+}
+
+// 표기만 다르고 값이 같은 경우(#5AA6FF vs #5aa6ff 등)를 같은 값으로 본다
+function keyOf(type, s) {
+  const v = cssToFigma(type, s);
+  if (v === null) return null;
+  if (type === 'FLOAT') return fmtNum(v, 2);
+  return [v.r, v.g, v.b].map(clamp255).join(',') + ',' + fmtNum(v.a, 3);
+}
+// </convert>
+
+const $ = (id) => document.getElementById(id);
+let base = {};
+let conflicts = [];
+let busy = false;
+let reqSeq = 0;
+const pending = new Map();
+
+function ask(msg) {
+  const reqId = ++reqSeq;
+  parent.postMessage({ pluginMessage: { ...msg, reqId } }, '*');
+  return new Promise((resolve, reject) => pending.set(reqId, { resolve, reject }));
+}
+onmessage = (e) => {
+  const msg = e.data.pluginMessage;
+  const p = msg && pending.get(msg.reqId);
+  if (!p) return;
+  pending.delete(msg.reqId);
+  msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg);
+};
+
+function log(text) {
+  const li = document.createElement('li');
+  li.textContent = `${new Date().toTimeString().slice(0, 8)}  ${text}`;
+  $('log').prepend(li);
+  while ($('log').children.length > 40) $('log').lastChild.remove();
+}
+
+function setStatus(state, text) {
+  $('dot').className = 'dot ' + state;
+  $('status').textContent = text;
+}
+
+const OFFLINE = '서버에 연결할 수 없음 — tools/figma-token-sync/실행.bat을 켜주세요';
+
+async function request(opts) {
+  let r;
+  try { r = await fetch(SERVER + '/tokens', { cache: 'no-store', ...opts }); }
+  catch { throw new Error(OFFLINE); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`서버 응답 ${r.status}: ${data.error || ''}`);
+  return data;
+}
+
+const postToCode = (updates) =>
+  request({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) });
+
+async function tick() {
+  if (busy || $('pause').checked) return;
+  busy = true;
+  try {
+    const [{ vars }, server] = await Promise.all([
+      ask({ type: 'snapshot' }),
+      request(),
+    ]);
+    const toCode = {}, toFigma = [], next = [], codeOnly = [], badFormat = [];
+    const seen = new Set();
+
+    for (const v of vars) {
+      seen.add(v.css);
+      const codeVal = server.tokens[v.css];
+      if (codeVal === undefined) continue;
+      const figmaVal = figmaToCss(v.type, v.value);
+      const fk = keyOf(v.type, figmaVal), ck = keyOf(v.type, codeVal);
+      if (ck === null) { badFormat.push(v.css); continue; }
+      const b = base[v.css];
+      if (fk === ck) { base[v.css] = fk; continue; }
+      if (b !== undefined && ck === b) toCode[v.css] = { value: figmaVal, key: fk, from: codeVal };
+      else if (b !== undefined && fk === b) toFigma.push({ id: v.id, css: v.css, type: v.type, value: cssToFigma(v.type, codeVal), key: ck, from: figmaVal, to: codeVal });
+      else next.push({ id: v.id, css: v.css, type: v.type, figmaVal, codeVal, fk, ck });
+    }
+    for (const name of Object.keys(server.tokens)) if (!seen.has(name)) codeOnly.push(name);
+
+    if (Object.keys(toCode).length) {
+      const payload = Object.fromEntries(Object.entries(toCode).map(([k, x]) => [k, x.value]));
+      await postToCode(payload);
+      for (const [k, x] of Object.entries(toCode)) { base[k] = x.key; log(`피그마 → 코드  ${k}: ${x.from} → ${x.value}`); }
+    }
+    if (toFigma.length) {
+      await ask({ type: 'apply', items: toFigma.map(({ id, value }) => ({ id, value })) });
+      for (const x of toFigma) { base[x.css] = x.key; log(`코드 → 피그마  ${x.css}: ${x.from} → ${x.to}`); }
+    }
+
+    conflicts = next;
+    render(codeOnly, badFormat, vars.length - badFormat.length);
+    setStatus('ok', `연결됨 · ${server.file.split(/[\\/]/).slice(-2).join('/')} 감시 중`);
+  } catch (e) {
+    setStatus('err', e.message === OFFLINE ? OFFLINE : `오류: ${e.message}`);
+  } finally {
+    busy = false;
+  }
+}
+
+function render(codeOnly, badFormat, synced) {
+  $('count').textContent = `토큰 ${synced}개 연결`;
+  $('conflicts').hidden = !conflicts.length;
+  const ul = $('conflictList');
+  ul.replaceChildren(...conflicts.map((c) => {
+    const li = document.createElement('li');
+    const code = document.createElement('code');
+    code.textContent = `${c.css}  피그마 ${c.figmaVal} / 코드 ${c.codeVal}`;
+    li.append(code);
+    return li;
+  }));
+  const notes = [];
+  if (codeOnly.length) notes.push(`코드에만 있는 토큰(동기화 안 함): ${codeOnly.join(', ')}`);
+  if (badFormat.length) notes.push(`형식이 맞지 않아 건너뜀: ${badFormat.join(', ')}`);
+  $('unmatched').hidden = !notes.length;
+  $('unmatched').textContent = notes.join(' · ');
+}
+
+document.querySelectorAll('[data-use]').forEach((btn) => btn.addEventListener('click', async () => {
+  if (busy || !conflicts.length) return;
+  busy = true;
+  try {
+    if (btn.dataset.use === 'figma') {
+      await postToCode(Object.fromEntries(conflicts.map((c) => [c.css, c.figmaVal])));
+      for (const c of conflicts) { base[c.css] = c.fk; log(`피그마 → 코드  ${c.css}: ${c.codeVal} → ${c.figmaVal}`); }
+    } else {
+      await ask({ type: 'apply', items: conflicts.map((c) => ({ id: c.id, value: cssToFigma(c.type, c.codeVal) })) });
+      for (const c of conflicts) { base[c.css] = c.ck; log(`코드 → 피그마  ${c.css}: ${c.figmaVal} → ${c.codeVal}`); }
+    }
+    conflicts = [];
+    $('conflicts').hidden = true;
+  } catch (e) {
+    log(`오류: ${e.message}`);
+  } finally {
+    busy = false;
+  }
+}));
+
+tick();
+setInterval(tick, INTERVAL);
+</script>
