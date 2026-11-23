@@ -6,6 +6,14 @@ const A = 0.42, S = 0.72, R = 0.16;
 const PITCH = S + 2 * A - 2 * R;
 const HALF = PITCH / 2;
 const N = 9;
+const MID = (N / 2) | 0; // 펜으로 그려지는 첫 고리 — 짝수 번째라 카메라를 정면으로 마주한다
+// 그림 → 철 과정의 타임라인(buildT 0→1). 기다리면 저절로 진행되고, 스크롤하면 앞당겨진다
+const BUILD_MS = 6200;
+const T = {
+  outer: [0.03, 0.30], hop: [0.30, 0.34], inner: [0.34, 0.50],
+  hatch: [0.50, 0.66], chrome: [0.64, 0.84], inflate: [0.62, 0.82],
+  lineFade: [0.66, 0.78], wave: [0.80, 1.0], camera: [0.78, 1.0], physics: 0.80,
+};
 const SLACK = 0.012;
 const FOV = 30;
 const GRAVITY = -2.5;
@@ -105,7 +113,70 @@ function init() {
   });
   metalTex('../assets/tex/metal009_roughness.jpg', (t) => { material.roughnessMap = t; material.roughness = 0.35; });
   metalTex('../assets/tex/metal009_normal.jpg', (t) => { material.normalMap = t; material.normalScale.set(0.35, 0.35); });
-  const mesh = new THREE.InstancedMesh(stadium(), material, N);
+
+  // ----- 그림 → 철 전환 셰이더 -----
+  // 펜이 그린 순서(철사 길이 방향 uv.x)를 따라 빗금이 채워지고, 같은 방향으로 납작한 평면이 둥근 철사로 부풀며 크롬이 된다.
+  // 첫 고리(aDelay < 0)는 uHatch·uChrome·uInflate를 그대로 따르고, 나머지 고리는 uWave에 맞춰 차례로 같은 과정을 빠르게 거친다
+  const geometry = stadium();
+  const uvAttr = geometry.attributes.uv;
+  const along = new Float32Array(uvAttr.count);
+  for (let i = 0; i < uvAttr.count; i++) along[i] = uvAttr.getX(i);
+  geometry.setAttribute('aU', new THREE.BufferAttribute(along, 1));
+  const delays = new Float32Array(N);
+  for (let i = 0; i < N; i++) delays[i] = i === MID ? -1 : Math.abs(i - MID) * 0.15;
+  geometry.setAttribute('aDelay', new THREE.InstancedBufferAttribute(delays, 1));
+  const morph = {
+    uHatch: { value: 0 }, uChrome: { value: 0 }, uInflate: { value: 0 }, uWave: { value: 0 },
+    uPR: { value: 1 },
+    uFill: { value: new THREE.Vector3(0x0e / 255, 0x12 / 255, 0x1a / 255) },
+    uLine: { value: new THREE.Vector3(0x5a / 255, 0xa6 / 255, 0xff / 255) },
+  };
+  material.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, morph);
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>
+attribute float aU;
+attribute float aDelay;
+uniform float uHatch, uChrome, uInflate, uWave;
+varying float vU;
+flat varying float vHatchP, vChromeP;`)
+      .replace('#include <beginnormal_vertex>', `float inflateP;
+if (aDelay < 0.0) { vHatchP = uHatch; vChromeP = uChrome; inflateP = uInflate; }
+else {
+  float w = clamp((uWave - aDelay) / 0.4, 0.0, 1.0);
+  vHatchP = w > 0.0 ? 1.01 : -1.0;
+  vChromeP = smoothstep(0.2, 0.9, w) * 1.04;
+  inflateP = smoothstep(0.15, 0.85, w);
+}
+// 완전히 0이면 삼각형이 선처럼 찌그러져 보간 오차가 점으로 새어 나온다 — 정면에선 보이지 않을 만큼의 두께를 남긴다
+inflateP = max(inflateP, 0.03);
+vU = aU;
+#include <beginnormal_vertex>
+objectNormal = normalize(mix(vec3(0.0, 0.0, 1.0), objectNormal, inflateP));`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+transformed.z *= inflateP;`);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>
+uniform float uPR;
+uniform vec3 uFill, uLine;
+varying float vU;
+flat varying float vHatchP, vChromeP;`)
+      .replace('void main() {', `void main() {
+  if (vHatchP <= 0.0 || vU >= vHatchP) discard;`)
+      .replace('#include <dithering_fragment>', `#include <dithering_fragment>
+  float edge = vChromeP;
+  float chromeAmt = 1.0 - smoothstep(edge - 0.012, edge, vU);
+  vec2 fc = gl_FragCoord.xy / uPR;
+  float d = abs(fract((fc.x + fc.y) / 11.0) - 0.5) * 11.0;
+  float line = 1.0 - smoothstep(0.7, 1.6, d);
+  vec3 flatCol = mix(uFill, uLine, line);
+  float seam = edge > 0.001 && edge < 1.0 ? exp(-abs(vU - edge) * 90.0) : 0.0;
+  float front = vHatchP < 1.0 ? exp(-abs(vU - vHatchP) * 160.0) : 0.0;
+  gl_FragColor.rgb = mix(flatCol, gl_FragColor.rgb, chromeAmt) + (seam * 0.9 + front * 0.6) * vec3(0.55, 0.78, 1.0);
+  gl_FragColor.a = 1.0;`);
+  };
+
+  const mesh = new THREE.InstancedMesh(geometry, material, N);
   mesh.frustumCulled = false;
   scene.add(mesh);
 
@@ -181,6 +252,7 @@ function init() {
     W = canvas.clientWidth || 1;
     H = canvas.clientHeight || 1;
     renderer.setSize(W, H, false);
+    morph.uPR.value = renderer.getPixelRatio();
     camera.aspect = W / H;
     camera.updateProjectionMatrix();
     portrait = W / H < 0.9;
@@ -201,7 +273,9 @@ function init() {
   // 처음엔 고리 2~3개만 화면을 채우는 클로즈업, 제목이 올라오는 동안 오른쪽으로 물러나며 조금 멀어진다
   // 첫 진입: 멀리서 서서히 밝아지며 클로즈업까지 다가온다
   const introStart = performance.now();
-  const INTRO_MS = reduceMotion ? 0 : 1800;
+  let buildT = reduceMotion ? 1 : 0;
+  const span01 = (t, [a, b]) => clamp01((t - a) / (b - a));
+  const physicsOn = () => buildT >= T.physics;
   // 체인 가운데 고리를 카메라가 늦게 따라가, 처지거나 흔들려도 화면 중심에 머물고 손으로 흔든 순간의 움직임은 살아 있다
   const follow = new THREE.Vector3();
   const centroid = new THREE.Vector3();
@@ -211,26 +285,182 @@ function init() {
     for (let i = mid - 1; i <= mid + 1; i++) centroid.add(links[i].position);
     centroid.divideScalar(3);
     centroid.z = 0;
-    follow.lerp(centroid, 1 - Math.exp(-dt / 1.1));
+    if (!physicsOn()) follow.copy(centroid);
+    else follow.lerp(centroid, 1 - Math.exp(-dt / 1.1));
+  }
+  // 그리는 동안: 첫 고리를 정면에서 마주 보는 자세 — 고리 평면이 화면과 평행해 펜 외곽선과 3D 외곽선이 정확히 겹친다
+  const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), camUp = new THREE.Vector3();
+  const bPos = new THREE.Vector3(), bLook = new THREE.Vector3(), bUp = new THREE.Vector3();
+  function buildPose() {
+    const hero = links[MID].position;
+    const visH = portrait ? 4.2 : 2.7;
+    const dist = visH / (2 * tanHalf);
+    bLook.set(hero.x, hero.y, hero.z);
+    bPos.set(hero.x, hero.y, hero.z + dist);
+    const roll = portrait ? -0.35 : -0.9;
+    bUp.set(Math.sin(roll), Math.cos(roll), 0);
   }
   function placeCamera() {
-    const p = smooth(clamp01(progress() / 0.8));
-    const intro = INTRO_MS ? 1 - Math.pow(1 - clamp01((performance.now() - introStart) / INTRO_MS), 3) : 1;
-    const visH = (portrait ? lerp(3.2, 5.6, p) : lerp(2.5, 4.0, p)) * lerp(1.9, 1, intro);
+    normalPose();
+    const k = smooth(span01(buildT, T.camera));
+    if (k < 1) {
+      buildPose();
+      camPos.lerpVectors(bPos, camPos, k);
+      camLook.lerpVectors(bLook, camLook, k);
+      camUp.lerpVectors(bUp, camUp, k).normalize();
+    }
+    camera.position.copy(camPos);
+    camera.up.copy(camUp);
+    camera.lookAt(camLook);
+    camera.updateMatrixWorld();
+    const fade = clamp01((performance.now() - introStart) / 500);
+    const o = ((portrait ? 0.32 : 1) * fade).toFixed(3);
+    canvas.style.opacity = o;
+    penSvg.style.opacity = o;
+  }
+  // 다 만든 뒤: 처음엔 고리 2~3개 클로즈업, 제목이 올라오는 동안 오른쪽으로 물러나며 조금 멀어진다
+  function normalPose() {
+    const p = smooth(clamp01((progress() - 0.3) / 0.55));
+    const visH = portrait ? lerp(3.2, 5.6, p) : lerp(2.5, 4.0, p);
     const dist = visH / (2 * tanHalf);
     const ndcX = portrait ? lerp(0, 0.42, p) : lerp(0.04, 0.66, p);
     // 제목이 들어서는 동안 화면을 기울여, 오른쪽에서 체인이 더 세로로 서 제목을 가로지르지 않게 한다
     const roll = portrait ? 0 : lerp(0, -0.6, p);
-    camera.up.set(Math.sin(roll), Math.cos(roll), 0);
+    camUp.set(Math.sin(roll), Math.cos(roll), 0);
     const halfW = (visH / 2) * camera.aspect;
     const yaw = lerp(-0.22, 0.12, p);
     // 화면 기준 오른쪽·위쪽(롤로 기울어진 축)으로 비켜야 기울기와 상관없이 의도한 자리에 놓인다
     const rx = Math.cos(roll), ry = -Math.sin(roll), ux = Math.sin(roll), uy = Math.cos(roll);
     const shiftR = -ndcX * halfW, shiftU = lerp(0.32, -0.15, p);
     const lx = follow.x + rx * shiftR + ux * shiftU, ly = follow.y + ry * shiftR + uy * shiftU;
-    camera.position.set(lx + Math.sin(yaw) * dist, ly, Math.cos(yaw) * dist);
-    camera.lookAt(lx, ly, 0);
-    canvas.style.opacity = ((portrait ? 0.32 : 1) * clamp01(intro * 1.6)).toFixed(3);
+    camPos.set(lx + Math.sin(yaw) * dist, ly, Math.cos(yaw) * dist);
+    camLook.set(lx, ly, 0);
+  }
+
+  // ----- 펜툴 레이어 -----
+  // 첫 고리의 바깥·안쪽 외곽선(스타디움)을 피그마 펜툴과 같은 베지어 구조로 만들어, 고리 좌표에서 화면으로 투영해 그린다
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const penSvg = document.createElementNS(SVG_NS, 'svg');
+  penSvg.setAttribute('class', 'pen-layer');
+  penSvg.setAttribute('aria-hidden', 'true');
+  canvas.after(penSvg);
+  const KAPPA = 0.5523;
+  function contour(r) {
+    const h = S / 2, k = KAPPA * r, q = (Math.PI * r) / 2;
+    const anchors = [[r, -h], [r, h], [0, h + r], [-r, h], [-r, -h], [0, -h - r]];
+    // 구간 i는 앵커 i → i+1, 곡선 구간은 [c1, c2]
+    const segs = [null, [[r, h + k], [k, h + r]], [[-k, h + r], [-r, h + k]], null, [[-r, -h - k], [-k, -h - r]], [[k, -h - r], [r, -h - k]]];
+    const lens = [S, q, q, S, q, q];
+    const total = lens.reduce((a, b) => a + b, 0);
+    let acc = 0;
+    const at = lens.map((l) => { const v = acc / total; acc += l; return v; });
+    return { anchors, segs, at };
+  }
+  const contours = [contour(A + R), contour(A - R)];
+  const el = (tag, attrs, parent = penSvg) => { const e = document.createElementNS(SVG_NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); return e; };
+  const penParts = contours.map((c) => {
+    const path = el('path', { class: 'pen-path' });
+    const nodes = c.anchors.map(() => {
+      const g = el('g', { class: 'pen-handle' });
+      const lines = [el('line', {}, g), el('line', {}, g)];
+      const knobs = [el('rect', { width: 7, height: 7 }, g), el('rect', { width: 7, height: 7 }, g)];
+      const dot = el('circle', { class: 'pen-anchor', r: 4.5 }, g);
+      return { g, lines, knobs, dot };
+    });
+    return { c, path, nodes };
+  });
+  const cursor = el('g', {});
+  const nib = el('g', { transform: 'rotate(40) scale(1.7)' }, cursor);
+  el('path', { class: 'pen-nib', d: 'M0 0 L-6.5 -11 L-6.5 -17 L6.5 -17 L6.5 -11 Z' }, nib);
+  el('path', { class: 'pen-nib', d: 'M-5.5 -20.5 H5.5 V-23.5 H-5.5 Z' }, nib);
+  el('line', { class: 'pen-nib-slit', x1: 0, y1: -1.5, x2: 0, y2: -8 }, nib);
+  el('circle', { class: 'pen-nib', r: 2, cy: -9.5 }, nib);
+
+  const pv = new CANNON.Vec3(), pw3 = new CANNON.Vec3(), pt3 = new THREE.Vector3();
+  function toScreen([x, y]) {
+    pv.set(x, y, 0);
+    links[MID].pointToWorldFrame(pv, pw3);
+    pt3.set(pw3.x, pw3.y, pw3.z).project(camera);
+    return [(pt3.x + 1) * 0.5 * W, (1 - pt3.y) * 0.5 * H];
+  }
+  const fmt = ([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`;
+  function pathD({ anchors, segs }) {
+    const s = anchors.map(toScreen);
+    let d = `M${fmt(s[0])}`;
+    for (let i = 0; i < 6; i++) {
+      const to = s[(i + 1) % 6];
+      d += segs[i] ? ` C${fmt(toScreen(segs[i][0]))} ${fmt(toScreen(segs[i][1]))} ${fmt(to)}` : ` L${fmt(to)}`;
+    }
+    return { d: d + ' Z', s };
+  }
+  function setHandle(node, side, from, ctl, on) {
+    const line = node.lines[side], knob = node.knobs[side];
+    if (!on || !ctl) { line.style.display = knob.style.display = 'none'; return; }
+    const [cx, cy] = toScreen(ctl);
+    line.style.display = knob.style.display = '';
+    line.setAttribute('x1', from[0]); line.setAttribute('y1', from[1]);
+    line.setAttribute('x2', cx); line.setAttribute('y2', cy);
+    knob.setAttribute('transform', `translate(${cx} ${cy}) rotate(45) translate(-3.5 -3.5)`);
+  }
+  // 그리는 진행도 f(0→1)에 맞춰 선을 늘리고, 지나간 앵커를 찍고, 방금 찍은 앵커의 핸들을 펼친다
+  function drawContour(part, f, anchorsOn) {
+    const { d, s } = pathD(part.c);
+    part.path.setAttribute('d', d);
+    const L = part.path.getTotalLength();
+    part.path.style.strokeDasharray = `${L} ${L}`;
+    part.path.style.strokeDashoffset = String(L * (1 - f));
+    part.path.style.display = f > 0 ? '' : 'none';
+    let last = -1;
+    part.c.at.forEach((a, i) => { if (f > 0 && f >= a) last = i; });
+    part.nodes.forEach((node, i) => {
+      const shown = anchorsOn && f > 0 && f >= part.c.at[i];
+      node.g.style.display = shown ? '' : 'none';
+      if (!shown) return;
+      node.dot.setAttribute('cx', s[i][0]); node.dot.setAttribute('cy', s[i][1]);
+      const active = i === last && f < 1;
+      const inCtl = part.c.segs[(i + 5) % 6] && part.c.segs[(i + 5) % 6][1];
+      const outCtl = part.c.segs[i] && part.c.segs[i][0];
+      setHandle(node, 0, s[i], inCtl, active);
+      setHandle(node, 1, s[i], outCtl, active);
+    });
+    return L;
+  }
+  function updatePen() {
+    if (buildT >= T.lineFade[1]) { penSvg.style.display = 'none'; return; }
+    penSvg.style.display = '';
+    penSvg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const fo = smooth(span01(buildT, T.outer)), fi = smooth(span01(buildT, T.inner));
+    const anchorsOn = buildT < T.hatch[0] + 0.04;
+    const Lo = drawContour(penParts[0], fo, anchorsOn);
+    const Li = drawContour(penParts[1], fi, anchorsOn);
+    penParts.forEach((p) => { p.path.style.opacity = String(1 - span01(buildT, T.lineFade)); });
+    // 펜 커서: 바깥선 끝 → 안쪽 시작점으로 건너뛰기 → 안쪽선 끝, 다 그리면 사라진다
+    let pt;
+    if (buildT < T.hop[0]) pt = penParts[0].path.getPointAtLength(Lo * fo);
+    else if (buildT < T.hop[1]) {
+      const a = penParts[0].path.getPointAtLength(Lo), b = toScreen(contours[1].anchors[0]);
+      const h = smooth(span01(buildT, T.hop));
+      pt = { x: lerp(a.x, b[0], h), y: lerp(a.y, b[1], h) - Math.sin(h * Math.PI) * 24 };
+    } else pt = penParts[1].path.getPointAtLength(Li * fi);
+    cursor.setAttribute('transform', `translate(${pt.x.toFixed(2)} ${pt.y.toFixed(2)})`);
+    const cIn = span01(buildT, [0, T.outer[0]]), cOut = 1 - span01(buildT, [T.inner[1], T.inner[1] + 0.04]);
+    cursor.style.opacity = String(Math.min(cIn, cOut));
+  }
+  function updateMorph() {
+    morph.uHatch.value = span01(buildT, T.hatch) * 1.001;
+    morph.uChrome.value = smooth(span01(buildT, T.chrome)) * 1.04;
+    morph.uInflate.value = smooth(span01(buildT, T.inflate));
+    morph.uWave.value = span01(buildT, T.wave);
+  }
+  // 시간이 흐르면 저절로, 스크롤하면 앞당겨 진행 — 한 번 만든 철은 되돌아가지 않고, 크게 건너뛰어도 1.2초 이상에 걸쳐 따라간다
+  let buildFrozen = false;
+  function advanceBuild(dt) {
+    if (buildT >= 1 || buildFrozen) return;
+    const byTime = (performance.now() - introStart) / BUILD_MS;
+    const pinned = document.documentElement.classList.contains('hero-pinned');
+    const byScroll = pinned ? progress() / 0.3 : 0;
+    const target = Math.min(1, Math.max(byTime, byScroll));
+    if (target > buildT) buildT = Math.min(target, buildT + dt / 1.2);
   }
 
   // ----- 입력 -----
@@ -277,7 +507,7 @@ function init() {
   }, { passive: true });
 
   addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || !visible || interactive(e.target) || !setRay(e)) return;
+    if (e.button !== 0 || !visible || !physicsOn() || interactive(e.target) || !setRay(e)) return;
     const hit = hitLink();
     if (!hit) return;
     const body = links[hit.instanceId];
@@ -314,7 +544,7 @@ function init() {
     const dy = scrollY - lastScroll;
     lastScroll = scrollY;
     needsRender = true;
-    if (reduceMotion || !visible) return;
+    if (reduceMotion || !visible || !physicsOn()) return;
     const k = Math.min(Math.abs(dy), 60) * 0.015 * (Math.random() - 0.5) * 2;
     const b = links[(Math.random() * N) | 0];
     b.applyImpulse(new CANNON.Vec3(perp.x * k, perp.y * k, (Math.random() - 0.5) * Math.abs(k)), b.position);
@@ -440,7 +670,7 @@ function init() {
 
   let needsRender = true, last = performance.now(), frame = 0;
   layout();
-  if (/chaindebug/.test(location.search)) window.__chain = { get links() { return links; }, limits, simulate, perp, anchorA, anchorB };
+  if (/chaindebug/.test(location.search)) window.__chain = { get links() { return links; }, limits, simulate, perp, anchorA, anchorB, setBuild: (v) => { buildT = v; buildFrozen = v !== null; }, get buildT() { return buildT; }, morph, snap: () => { renderer.render(scene, camera); return canvas.toDataURL(); } };
   if (reduceMotion) {
     for (let i = 0; i < 360; i++) simulate(1 / 120);
   } else {
@@ -454,10 +684,17 @@ function init() {
     const dt = Math.min(elapsed, 1 / 30);
     last = now;
     if (document.hidden || !visible) return;
-    if (!reduceMotion) { simulate(dt); sync(); needsRender = true; }
+    advanceBuild(elapsed);
+    if (!reduceMotion) {
+      if (physicsOn()) simulate(dt);
+      sync();
+      needsRender = true;
+    }
+    updateMorph();
     trackChain(reduceMotion ? 10 : elapsed);
     placeCamera();
-    if (hoverDirty && !drag && ++frame % 3 === 0) {
+    updatePen();
+    if (hoverDirty && !drag && physicsOn() && ++frame % 3 === 0) {
       hoverDirty = false;
       const over = !pointerOverUi && !!hitLink();
       if (over !== hovering) { hovering = over; document.documentElement.classList.toggle('chain-hover', over); }
