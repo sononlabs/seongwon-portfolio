@@ -28,20 +28,30 @@
 </nav>
 
 <!-- HERO -->
-<header class="hero wrap">
-  <div class="hero-eyebrow"><span class="blink"></span>AVAILABLE FOR OPPORTUNITIES</div>
-  <h1>UX/UI Designer<br>for <span class="hl">Game</span> &amp;<br>Interactive Worlds.</h1>
-  <p class="hero-sub">사용자 중심의 올바른 문제 정의로 복잡성을 풀어내고, 다양한 기술을 시각화하여 새로운 경험을 전달하는 디자이너 <strong>이성원</strong>입니다.</p>
-  <div class="hero-meta">
-    <div>CURRENTLY<span>크로노스튜디오 · UX Designer</span></div>
-    <div>FOCUS<span>Game UX · UMG · AI-assisted Design</span></div>
-    <div>LOCATION<span>Seoul, Korea</span></div>
+<div class="hero-pin" id="hero-pin">
+  <div class="hero-stage">
+    <canvas id="chain-canvas" aria-hidden="true"></canvas>
+    <header class="hero wrap">
+      <div class="hero-eyebrow" data-reveal><span class="blink"></span>AVAILABLE FOR OPPORTUNITIES</div>
+      <h1>
+        <span class="line" data-reveal><span>UX/UI Designer</span></span>
+        <span class="line" data-reveal><span>for <span class="hl">Game</span> &amp;</span></span>
+        <span class="line" data-reveal><span>Interactive Worlds.</span></span>
+      </h1>
+      <p class="hero-sub" data-reveal>사용자 중심의 올바른 문제 정의로 복잡성을 풀어내고, 다양한 기술을 시각화하여 새로운 경험을 전달하는 디자이너 <strong>이성원</strong>입니다.</p>
+      <div class="hero-meta" data-reveal>
+        <div>CURRENTLY<span>크로노스튜디오 · UX Designer</span></div>
+        <div>FOCUS<span>Game UX · UMG · AI-assisted Design</span></div>
+        <div>LOCATION<span>Seoul, Korea</span></div>
+      </div>
+      <div class="hero-actions" data-reveal>
+        <a href="#work" class="btn btn-primary">Work 보기 →</a>
+        <a href="#contact" class="btn btn-ghost">Contact</a>
+      </div>
+    </header>
+    <div class="scroll-cue" aria-hidden="true"><span>SCROLL</span><i></i><small>OR DRAG THE CHAIN</small></div>
   </div>
-  <div class="hero-actions">
-    <a href="#work" class="btn btn-primary">Work 보기 →</a>
-    <a href="#contact" class="btn btn-ghost">Contact</a>
-  </div>
-</header>
+</div>
 
 <!-- ABOUT -->
 <section id="about">
@@ -306,5 +316,15 @@
 <footer>© 2026 SEONGWON LEE — DESIGNED &amp; BUILT FOR CHRONOSTUDIO PORTFOLIO</footer>
 
 <script src="js/main.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+    "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+  }
+}
+</script>
+<script type="module" src="js/chain.js"></script>
 </body>
 </html>

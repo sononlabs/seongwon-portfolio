@@ -1,0 +1,382 @@
+import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
+
+// 고리 하나의 형태: 가로 a(반원 반지름), 직선부 s, 철사 두께 r — 피치(고리 간 거리)는 안쪽 길이와 같다
+const A = 0.42, S = 0.72, R = 0.16;
+const PITCH = S + 2 * A - 2 * R;
+const HALF = PITCH / 2;
+const N = 9;
+const SLACK = 0.012;
+const FOV = 30;
+const GRAVITY = -2.5;
+const DRAG_FORCE = 160;
+const LINK = 1, POINTER = 2;
+
+const canvas = document.getElementById('chain-canvas');
+const pin = document.getElementById('hero-pin');
+if (canvas && pin) init();
+
+function stadium() {
+  const curve = new THREE.Curve();
+  const total = 2 * S + 2 * Math.PI * A;
+  curve.getPoint = (t, target = new THREE.Vector3()) => {
+    let d = t * total;
+    if (d < S) return target.set(A, -S / 2 + d, 0);
+    d -= S;
+    if (d < Math.PI * A) { const th = d / A; return target.set(A * Math.cos(th), S / 2 + A * Math.sin(th), 0); }
+    d -= Math.PI * A;
+    if (d < S) return target.set(-A, S / 2 - d, 0);
+    d -= S;
+    const th = Math.PI + d / A;
+    return target.set(A * Math.cos(th), -S / 2 + A * Math.sin(th), 0);
+  };
+  return new THREE.TubeGeometry(curve, 120, R, 28, true);
+}
+
+// 크롬은 비치는 환경이 곧 색이다 — 어두운 스튜디오에 밝은 조명 띠를 둘러 대비 강한 반사를 만든다
+function chromeStudio() {
+  const env = new THREE.Scene();
+  // 위는 밝고 수평선 아래로 갈수록 어두워지는 하늘 — 크롬 표면에 부드러운 명암 그라데이션이 생긴다
+  const sky = new THREE.SphereGeometry(50, 48, 24);
+  const top = new THREE.Color(0x8a919e), mid = new THREE.Color(0x2c3038), bottom = new THREE.Color(0x0b0c10);
+  const colors = [];
+  const pos = sky.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const h = pos.getY(i) / 50;
+    const c = h > 0 ? mid.clone().lerp(top, Math.pow(h, 0.7)) : mid.clone().lerp(bottom, Math.pow(-h, 0.6));
+    colors.push(c.r, c.g, c.b);
+  }
+  sky.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  env.add(new THREE.Mesh(sky, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+  const strip = (w, h, x, y, z, intensity, tint = 0xffffff) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: new THREE.Color(tint).multiplyScalar(intensity), side: THREE.DoubleSide }));
+    m.position.set(x, y, z);
+    m.lookAt(0, 0, 0);
+    env.add(m);
+  };
+  strip(60, 14, 0, 22, 6, 3.2);
+  strip(6, 34, -22, 2, 12, 2.6);
+  strip(5, 34, 22, 0, 8, 3);
+  strip(40, 6, 0, -18, 14, 1.2);
+  strip(26, 20, 0, 4, 26, 1.6, 0xe6ecf7);
+  strip(20, 20, 0, 4, -26, 0.6);
+  return env;
+}
+
+function init() {
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
+  } catch {
+    canvas.remove();
+    return;
+  }
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.1;
+
+  const scene = new THREE.Scene();
+  scene.environment = new THREE.PMREMGenerator(renderer).fromScene(chromeStudio(), 0.035).texture;
+  const key = new THREE.DirectionalLight(0xffffff, 1.6);
+  key.position.set(6, 10, 9);
+  scene.add(key);
+
+  const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 200);
+  const tanHalf = Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+
+  const material = new THREE.MeshStandardMaterial({ color: 0xf2f4f8, metalness: 1, roughness: 0.08, envMapIntensity: 1.15 });
+  const mesh = new THREE.InstancedMesh(stadium(), material, N);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+
+  // ----- 물리: 양 끝을 화면 밖 대각선 위아래에 고정한 체인 -----
+  const world = new CANNON.World({ gravity: new CANNON.Vec3(0, GRAVITY, 0) });
+  world.solver.iterations = 30;
+  world.defaultContactMaterial.restitution = 0.35;
+  world.defaultContactMaterial.friction = 0.1;
+
+  const PIV_TOP = new CANNON.Vec3(0, HALF, 0);
+  const PIV_BOTTOM = new CANNON.Vec3(0, -HALF, 0);
+  const ZERO = new CANNON.Vec3();
+  const shape = new CANNON.Box(new CANNON.Vec3(A + R, S / 2 + A + R, R));
+  const ghost = { collisionFilterGroup: 0, collisionFilterMask: 0 };
+  const anchorA = new CANNON.Body({ type: CANNON.Body.KINEMATIC, ...ghost });
+  const anchorB = new CANNON.Body({ type: CANNON.Body.KINEMATIC, ...ghost });
+  world.addBody(anchorA);
+  world.addBody(anchorB);
+  const pointer = new CANNON.Body({ type: CANNON.Body.KINEMATIC, shape: new CANNON.Sphere(0.24), position: new CANNON.Vec3(0, 99, 0), collisionFilterGroup: POINTER, collisionFilterMask: LINK });
+  const dragBody = new CANNON.Body({ type: CANNON.Body.KINEMATIC, position: new CANNON.Vec3(0, 99, 0), ...ghost });
+  world.addBody(pointer);
+  world.addBody(dragBody);
+
+  let links = [], joints = [], dir = new CANNON.Vec3(), perp = new CANNON.Vec3(), baseA = new CANNON.Vec3(), baseB = new CANNON.Vec3();
+  let builtAngle = null;
+
+  function build(angleDeg) {
+    links.forEach((b) => world.removeBody(b));
+    joints.forEach((c) => world.removeConstraint(c));
+    links = [];
+    joints = [];
+    const th = THREE.MathUtils.degToRad(angleDeg);
+    dir.set(Math.cos(th), -Math.sin(th), 0);
+    perp.set(Math.sin(th), Math.cos(th), 0);
+    const span = N * PITCH * (1 - SLACK);
+    baseA.set(-dir.x * span / 2, -dir.y * span / 2, 0);
+    baseB.set(dir.x * span / 2, dir.y * span / 2, 0);
+    anchorA.position.copy(baseA);
+    anchorB.position.copy(baseB);
+    // 고리의 -Y(아래 걸림점)가 체인 진행 방향을 향하도록 Z축으로 돌리고, 짝수/홀수 고리는 자기 축으로 90° 엇갈린다
+    const qz = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 0, 1), Math.PI / 2 - th);
+    const qTwist = qz.mult(new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.PI / 2));
+    for (let i = 0; i < N; i++) {
+      const d = (HALF + i * PITCH) * (1 - SLACK);
+      const b = new CANNON.Body({
+        mass: 1, shape,
+        position: new CANNON.Vec3(baseA.x + dir.x * d, baseA.y + dir.y * d, 0),
+        linearDamping: 0.22, angularDamping: 0.45,
+        collisionFilterGroup: LINK, collisionFilterMask: POINTER,
+      });
+      b.quaternion.copy(i % 2 ? qTwist : qz);
+      world.addBody(b);
+      links.push(b);
+    }
+    for (let i = 0; i <= N; i++) {
+      const c = i === 0 ? new CANNON.PointToPointConstraint(anchorA, ZERO, links[0], PIV_TOP)
+        : i === N ? new CANNON.PointToPointConstraint(links[N - 1], PIV_BOTTOM, anchorB, ZERO)
+        : new CANNON.PointToPointConstraint(links[i - 1], PIV_BOTTOM, links[i], PIV_TOP);
+      world.addConstraint(c);
+      joints.push(c);
+    }
+    builtAngle = angleDeg;
+  }
+
+  // ----- 화면 배치 -----
+  let W = 1, H = 1, portrait = false;
+  function layout() {
+    W = canvas.clientWidth || 1;
+    H = canvas.clientHeight || 1;
+    renderer.setSize(W, H, false);
+    camera.aspect = W / H;
+    camera.updateProjectionMatrix();
+    portrait = W / H < 0.9;
+    const angle = portrait ? 64 : 30;
+    if (angle !== builtAngle) { release(); build(angle); sync(); }
+    needsRender = true;
+  }
+
+  const lerp = THREE.MathUtils.lerp;
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const smooth = (x) => x * x * (3 - 2 * x);
+  function progress() {
+    if (!document.documentElement.classList.contains('hero-pinned')) return 1;
+    const r = pin.getBoundingClientRect();
+    return clamp01(-r.top / (r.height - innerHeight));
+  }
+
+  // 처음엔 고리 2~3개만 화면을 채우는 클로즈업, 제목이 올라오는 동안 오른쪽으로 물러나며 조금 멀어진다
+  // 첫 진입: 멀리서 서서히 밝아지며 클로즈업까지 다가온다
+  const introStart = performance.now();
+  const INTRO_MS = reduceMotion ? 0 : 1800;
+  // 체인 가운데 고리를 카메라가 늦게 따라가, 처지거나 흔들려도 화면 중심에 머물고 손으로 흔든 순간의 움직임은 살아 있다
+  const follow = new THREE.Vector3();
+  const centroid = new THREE.Vector3();
+  function trackChain(dt) {
+    centroid.set(0, 0, 0);
+    const mid = (N / 2) | 0;
+    for (let i = mid - 1; i <= mid + 1; i++) centroid.add(links[i].position);
+    centroid.divideScalar(3);
+    centroid.z = 0;
+    follow.lerp(centroid, 1 - Math.exp(-dt / 1.1));
+  }
+  function placeCamera() {
+    const p = smooth(clamp01(progress() / 0.8));
+    const intro = INTRO_MS ? 1 - Math.pow(1 - clamp01((performance.now() - introStart) / INTRO_MS), 3) : 1;
+    const visH = (portrait ? lerp(3.2, 5.6, p) : lerp(2.5, 4.0, p)) * lerp(1.9, 1, intro);
+    const dist = visH / (2 * tanHalf);
+    const ndcX = portrait ? lerp(0, 0.42, p) : lerp(0.04, 0.66, p);
+    // 제목이 들어서는 동안 화면을 기울여, 오른쪽에서 체인이 더 세로로 서 제목을 가로지르지 않게 한다
+    const roll = portrait ? 0 : lerp(0, -0.6, p);
+    camera.up.set(Math.sin(roll), Math.cos(roll), 0);
+    const halfW = (visH / 2) * camera.aspect;
+    const yaw = lerp(-0.22, 0.12, p);
+    // 화면 기준 오른쪽·위쪽(롤로 기울어진 축)으로 비켜야 기울기와 상관없이 의도한 자리에 놓인다
+    const rx = Math.cos(roll), ry = -Math.sin(roll), ux = Math.sin(roll), uy = Math.cos(roll);
+    const shiftR = -ndcX * halfW, shiftU = lerp(0.32, -0.15, p);
+    const lx = follow.x + rx * shiftR + ux * shiftU, ly = follow.y + ry * shiftR + uy * shiftU;
+    camera.position.set(lx + Math.sin(yaw) * dist, ly, Math.cos(yaw) * dist);
+    camera.lookAt(lx, ly, 0);
+    canvas.style.opacity = ((portrait ? 0.32 : 1) * clamp01(intro * 1.6)).toFixed(3);
+  }
+
+  // ----- 입력 -----
+  const raycaster = new THREE.Raycaster();
+  const ndcPt = new THREE.Vector2();
+  const facePlane = new THREE.Plane();
+  const dragPlane = new THREE.Plane();
+  const hitPt = new THREE.Vector3();
+  const tmpV = new THREE.Vector3();
+  let pointerTarget = null, lastMove = 0, pointerActive = false, pointerOverUi = false;
+  let drag = null, hoverDirty = false, hovering = false, visible = true;
+  const interactive = (el) => el && el.closest && el.closest('a, button, input, textarea, select, label, [role="button"]');
+
+  function setRay(e) {
+    const r = canvas.getBoundingClientRect();
+    if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) return false;
+    ndcPt.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndcPt, camera);
+    return true;
+  }
+  function hitLink() {
+    mesh.computeBoundingSphere();
+    const hit = raycaster.intersectObject(mesh, false)[0];
+    return hit && hit.instanceId !== undefined ? hit : null;
+  }
+
+  addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch' || !visible) return;
+    const inside = setRay(e);
+    pointerOverUi = !!interactive(e.target);
+    if (drag) {
+      if (inside && raycaster.ray.intersectPlane(dragPlane, hitPt)) drag.target.copy(hitPt);
+      return;
+    }
+    if (!inside) { pointerActive = false; return; }
+    facePlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tmpV).negate(), new THREE.Vector3());
+    if (raycaster.ray.intersectPlane(facePlane, hitPt)) {
+      if (!pointerActive) { pointer.position.set(hitPt.x, hitPt.y, hitPt.z); pointer.velocity.setZero(); }
+      pointerTarget = hitPt.clone();
+      pointerActive = true;
+      lastMove = performance.now();
+    }
+    hoverDirty = true;
+  }, { passive: true });
+
+  addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !visible || interactive(e.target) || !setRay(e)) return;
+    const hit = hitLink();
+    if (!hit) return;
+    const body = links[hit.instanceId];
+    const at = new CANNON.Vec3(hit.point.x, hit.point.y, hit.point.z);
+    if (e.pointerType === 'touch') {
+      body.applyImpulse(new CANNON.Vec3(perp.x * 9 * (Math.random() < 0.5 ? -1 : 1), perp.y * 9, (Math.random() - 0.5) * 8), at);
+      return;
+    }
+    e.preventDefault();
+    dragBody.position.copy(at);
+    dragBody.velocity.setZero();
+    const c = new CANNON.PointToPointConstraint(body, body.pointToLocalFrame(at), dragBody, new CANNON.Vec3(), DRAG_FORCE);
+    world.addConstraint(c);
+    dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tmpV).negate(), hit.point);
+    drag = { c, target: hit.point.clone() };
+    pointerActive = false;
+    pointer.position.set(0, 99, 0);
+    document.documentElement.classList.add('chain-grabbing');
+  });
+
+  function release() {
+    if (!drag) return;
+    world.removeConstraint(drag.c);
+    dragBody.position.set(0, 99, 0);
+    drag = null;
+    document.documentElement.classList.remove('chain-grabbing');
+  }
+  addEventListener('pointerup', release);
+  addEventListener('pointercancel', release);
+  addEventListener('blur', release);
+
+  let lastScroll = scrollY;
+  addEventListener('scroll', () => {
+    const dy = scrollY - lastScroll;
+    lastScroll = scrollY;
+    needsRender = true;
+    if (reduceMotion || !visible) return;
+    const k = Math.min(Math.abs(dy), 60) * 0.015 * (Math.random() - 0.5) * 2;
+    const b = links[(Math.random() * N) | 0];
+    b.applyImpulse(new CANNON.Vec3(perp.x * k, perp.y * k, (Math.random() - 0.5) * Math.abs(k)), b.position);
+  }, { passive: true });
+  addEventListener('resize', layout);
+  new IntersectionObserver(([en]) => { visible = en.isIntersecting; if (!visible) release(); }).observe(canvas);
+
+  // ----- 시뮬레이션 -----
+  const pw = new CANNON.Vec3(), cw = new CANNON.Vec3();
+  function keepConnected() {
+    // 구속이 강한 힘에 밀려 벌어져도 양 끝에서 번갈아 다시 붙여, 클로즈업에서도 틈이 보이지 않게 한다
+    for (let pass = 0; pass < 4; pass++) {
+      for (let j = 0; j <= N; j++) {
+        if (j === 0) pw.copy(anchorA.position); else links[j - 1].pointToWorldFrame(PIV_BOTTOM, pw);
+        if (j === N) cw.copy(anchorB.position); else links[j].pointToWorldFrame(PIV_TOP, cw);
+        const dx = pw.x - cw.x, dy = pw.y - cw.y, dz = pw.z - cw.z;
+        if (dx * dx + dy * dy + dz * dz < 1e-6) continue;
+        const parentFixed = j === 0, childFixed = j === N;
+        const wp = parentFixed ? 0 : childFixed ? 1 : 0.5;
+        const wc = 1 - wp;
+        if (!parentFixed) { const b = links[j - 1].position; b.x -= dx * wp; b.y -= dy * wp; b.z -= dz * wp; }
+        if (!childFixed) { const b = links[j].position; b.x += dx * wc; b.y += dy * wc; b.z += dz * wc; }
+      }
+    }
+  }
+
+  function steer(body, target, dt) {
+    body.velocity.set((target.x - body.position.x) / dt, (target.y - body.position.y) / dt, (target.z - body.position.z) / dt);
+  }
+
+  // 손대지 않아도 양 끝이 천천히 엇갈려 움직여 체인이 계속 살아 있는 것처럼 출렁인다
+  const tA = new CANNON.Vec3(), tB = new CANNON.Vec3();
+  let clock = 0;
+  function simulate(dt) {
+    clock += dt;
+    const swayA = Math.sin(clock * 0.7) * 0.22, swayB = Math.sin(clock * 0.53 + 2) * 0.22;
+    tA.set(baseA.x + perp.x * swayA, baseA.y + perp.y * swayA, Math.sin(clock * 0.41) * 0.25);
+    tB.set(baseB.x + perp.x * swayB, baseB.y + perp.y * swayB, Math.cos(clock * 0.37) * 0.25);
+    steer(anchorA, tA, dt);
+    steer(anchorB, tB, dt);
+    if (drag) steer(dragBody, drag.target, dt);
+    if (pointerActive && !drag) {
+      if (performance.now() - lastMove > 120) pointer.velocity.setZero();
+      else steer(pointer, pointerTarget, dt);
+    }
+    world.step(1 / 120, dt, 6);
+    keepConnected();
+  }
+
+  const dummy = new THREE.Object3D();
+  function sync() {
+    for (let i = 0; i < links.length; i++) {
+      const b = links[i];
+      dummy.position.set(b.position.x, b.position.y, b.position.z);
+      dummy.quaternion.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  let needsRender = true, last = performance.now(), frame = 0;
+  layout();
+  if (reduceMotion) {
+    for (let i = 0; i < 360; i++) simulate(1 / 120);
+  } else {
+    links.forEach((b, i) => { const s = Math.sin((i / N) * Math.PI) * 3; b.velocity.set(-perp.x * s, -perp.y * s, 1.5); });
+  }
+  sync();
+
+  function loop(now) {
+    requestAnimationFrame(loop);
+    const elapsed = (now - last) / 1000;
+    const dt = Math.min(elapsed, 1 / 30);
+    last = now;
+    if (document.hidden || !visible) return;
+    if (!reduceMotion) { simulate(dt); sync(); needsRender = true; }
+    trackChain(reduceMotion ? 10 : elapsed);
+    placeCamera();
+    if (hoverDirty && !drag && ++frame % 3 === 0) {
+      hoverDirty = false;
+      const over = !pointerOverUi && !!hitLink();
+      if (over !== hovering) { hovering = over; document.documentElement.classList.toggle('chain-hover', over); }
+    }
+    if (needsRender) { renderer.render(scene, camera); needsRender = false; }
+  }
+  requestAnimationFrame(loop);
+}

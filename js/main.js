@@ -1,8 +1,38 @@
-// Nav scroll state
+// Nav scroll state — 히어로 핀 구간에서는 배경 없이 두어 체인 클로즈업을 가리지 않는다
 const nav = document.getElementById('nav');
-window.addEventListener('scroll', () => {
-  nav.classList.toggle('scrolled', window.scrollY > 10);
-}, { passive: true });
+const heroPin = document.getElementById('hero-pin');
+const updateNav = () => {
+  const pinned = document.documentElement.classList.contains('hero-pinned');
+  const threshold = pinned && heroPin ? heroPin.offsetTop + heroPin.offsetHeight - innerHeight - 40 : 10;
+  nav.classList.toggle('scrolled', window.scrollY > threshold);
+};
+window.addEventListener('scroll', updateNav, { passive: true });
+window.addEventListener('resize', updateNav);
+
+// Hero pin: 처음엔 체인만 보이고, 스크롤 진행도에 따라 제목 요소가 차례로 올라온다
+const pin = document.getElementById('hero-pin');
+if (pin) {
+  const items = [...pin.querySelectorAll('[data-reveal]')];
+  const cue = pin.querySelector('.scroll-cue');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)');
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+  const update = () => {
+    const pinned = !reduce.matches && innerWidth >= 720 && innerHeight >= 620;
+    document.documentElement.classList.toggle('hero-pinned', pinned);
+    let p = 1;
+    if (pinned) {
+      const r = pin.getBoundingClientRect();
+      p = clamp(-r.top / (r.height - innerHeight));
+    }
+    items.forEach((el, i) => el.style.setProperty('--t', ease(clamp((p - 0.12 - i * 0.075) / 0.2)).toFixed(4)));
+    if (cue) cue.style.opacity = String(1 - clamp(p / 0.06));
+  };
+  addEventListener('scroll', update, { passive: true });
+  addEventListener('resize', update);
+  update();
+}
+updateNav();
 
 // Reveal on scroll
 const revealEls = document.querySelectorAll('.reveal');
