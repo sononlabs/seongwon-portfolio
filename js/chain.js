@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 
 // 고리 하나의 형태: 가로 a(반원 반지름), 직선부 s, 철사 두께 r — 피치(고리 간 거리)는 안쪽 길이와 같다
-const A = 0.42, S = 0.72, R = 0.16;
+const A = 0.42, S = 0.72, R = 0.175;
 const PITCH = S + 2 * A - 2 * R;
 const HALF = PITCH / 2;
 const N = 9;
@@ -14,14 +14,17 @@ const T = {
   hatch: [0.50, 0.66], chrome: [0.64, 0.84], inflate: [0.62, 0.82],
   lineFade: [0.66, 0.78], wave: [0.80, 1.0], camera: [0.78, 1.0], physics: 0.80,
 };
-const SLACK = 0.012;
+// 무게감: 무거운 철은 툭 쳐도 조금만 밀리고, 한번 움직이면 관성으로 느리게 크게 흔들리며, 튕기지 않고 축 처진다
+const SLACK = 0.02;
 const FOV = 30;
-const GRAVITY = -2.5;
-const DRAG_FORCE = 160;
+const GRAVITY = -4.5;
+const LINK_MASS = 5;
+const DRAG_FORCE = 230;
+const POINTER_MAX_SPEED = 4; // 마우스를 휙 지나가도 무거운 체인이 날아가지 않게 밀어내는 속도를 제한
 const LINK = 1, POINTER = 2;
 // 맞물린 고리는 이웃에 대해 마음대로 돌 수 없다 — 철사 굵기(2R)와 구멍 폭(2(A-R))이 허락하는 만큼만 비틀리고 꺾인다
-// 비틀림: 0.16/cosφ + 0.16·tanφ ≤ 0.26 을 풀면 약 27°, 꺾임: 반원 안쪽을 미끄러져 직선부에 닿기 전까지
-const TWIST_MAX = THREE.MathUtils.degToRad(25);
+// 비틀림: 0.175/cosφ + 0.175·tanφ ≤ 0.245 를 풀면 약 19°, 꺾임: 반원 안쪽을 미끄러져 직선부에 닿기 전까지
+const TWIST_MAX = THREE.MathUtils.degToRad(18);
 const SWING_MAX = THREE.MathUtils.degToRad(62);
 
 const canvas = document.getElementById('chain-canvas');
@@ -183,8 +186,8 @@ flat varying float vHatchP, vChromeP;`)
   // ----- 물리: 양 끝을 화면 밖 대각선 위아래에 고정한 체인 -----
   const world = new CANNON.World({ gravity: new CANNON.Vec3(0, GRAVITY, 0) });
   world.solver.iterations = 30;
-  world.defaultContactMaterial.restitution = 0.35;
-  world.defaultContactMaterial.friction = 0.1;
+  world.defaultContactMaterial.restitution = 0.02;
+  world.defaultContactMaterial.friction = 0.4;
 
   const PIV_TOP = new CANNON.Vec3(0, HALF, 0);
   const PIV_BOTTOM = new CANNON.Vec3(0, -HALF, 0);
@@ -227,9 +230,9 @@ flat varying float vHatchP, vChromeP;`)
     for (let i = 0; i < N; i++) {
       const d = (HALF + i * PITCH) * (1 - SLACK);
       const b = new CANNON.Body({
-        mass: 1, shape,
+        mass: LINK_MASS, shape,
         position: new CANNON.Vec3(baseA.x + dir.x * d, baseA.y + dir.y * d, 0),
-        linearDamping: 0.22, angularDamping: 0.45,
+        linearDamping: 0.3, angularDamping: 0.7,
         collisionFilterGroup: LINK, collisionFilterMask: POINTER,
       });
       b.quaternion.copy(i % 2 ? qTwist : qz);
@@ -513,7 +516,7 @@ flat varying float vHatchP, vChromeP;`)
     const body = links[hit.instanceId];
     const at = new CANNON.Vec3(hit.point.x, hit.point.y, hit.point.z);
     if (e.pointerType === 'touch') {
-      body.applyImpulse(new CANNON.Vec3(perp.x * 9 * (Math.random() < 0.5 ? -1 : 1), perp.y * 9, (Math.random() - 0.5) * 8), at);
+      body.applyImpulse(new CANNON.Vec3(perp.x * 22 * (Math.random() < 0.5 ? -1 : 1), perp.y * 22, (Math.random() - 0.5) * 18), at);
       return;
     }
     e.preventDefault();
@@ -545,7 +548,7 @@ flat varying float vHatchP, vChromeP;`)
     lastScroll = scrollY;
     needsRender = true;
     if (reduceMotion || !visible || !physicsOn()) return;
-    const k = Math.min(Math.abs(dy), 60) * 0.015 * (Math.random() - 0.5) * 2;
+    const k = Math.min(Math.abs(dy), 60) * 0.04 * (Math.random() - 0.5) * 2;
     const b = links[(Math.random() * N) | 0];
     b.applyImpulse(new CANNON.Vec3(perp.x * k, perp.y * k, (Math.random() - 0.5) * Math.abs(k)), b.position);
   }, { passive: true });
@@ -642,15 +645,19 @@ flat varying float vHatchP, vChromeP;`)
   let clock = 0;
   function simulate(dt) {
     clock += dt;
-    const swayA = Math.sin(clock * 0.7) * 0.22, swayB = Math.sin(clock * 0.53 + 2) * 0.22;
-    tA.set(baseA.x + perp.x * swayA, baseA.y + perp.y * swayA, Math.sin(clock * 0.41) * 0.25);
-    tB.set(baseB.x + perp.x * swayB, baseB.y + perp.y * swayB, Math.cos(clock * 0.37) * 0.25);
+    const swayA = Math.sin(clock * 0.42) * 0.1, swayB = Math.sin(clock * 0.31 + 2) * 0.1;
+    tA.set(baseA.x + perp.x * swayA, baseA.y + perp.y * swayA, Math.sin(clock * 0.25) * 0.12);
+    tB.set(baseB.x + perp.x * swayB, baseB.y + perp.y * swayB, Math.cos(clock * 0.22) * 0.12);
     steer(anchorA, tA, dt);
     steer(anchorB, tB, dt);
     if (drag) steer(dragBody, drag.target, dt);
     if (pointerActive && !drag) {
       if (performance.now() - lastMove > 120) pointer.velocity.setZero();
-      else steer(pointer, pointerTarget, dt);
+      else {
+        steer(pointer, pointerTarget, dt);
+        const v = pointer.velocity.length();
+        if (v > POINTER_MAX_SPEED) pointer.velocity.scale(POINTER_MAX_SPEED / v, pointer.velocity);
+      }
     }
     world.step(1 / 120, dt, 6);
     keepConnected();
@@ -674,7 +681,7 @@ flat varying float vHatchP, vChromeP;`)
   if (reduceMotion) {
     for (let i = 0; i < 360; i++) simulate(1 / 120);
   } else {
-    links.forEach((b, i) => { const s = Math.sin((i / N) * Math.PI) * 3; b.velocity.set(-perp.x * s, -perp.y * s, 1.5); });
+    links.forEach((b, i) => { const s = Math.sin((i / N) * Math.PI) * 1.2; b.velocity.set(-perp.x * s, -perp.y * s, 0.6); });
   }
   sync();
 
