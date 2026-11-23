@@ -14,13 +14,17 @@ const T = {
   hatch: [0.50, 0.66], chrome: [0.64, 0.84], inflate: [0.62, 0.82],
   lineFade: [0.66, 0.78], wave: [0.80, 1.0], camera: [0.78, 1.0], physics: 0.80,
 };
-// 무게감: 무거운 철은 툭 쳐도 조금만 밀리고, 한번 움직이면 관성으로 느리게 크게 흔들리며, 튕기지 않고 축 처진다
+// 무게감: 고리 하나가 약 1.9 단위 — 실제 크기로 치면 중력이 훨씬 세야 '무거운 쇠'로 보인다(약하면 달 위처럼 둥실 뜬다).
+// 그래서 중력을 크게 두어 놓으면 툭 떨어지고 축 늘어지며, 질량도 커서 쳐도 조금만 밀리고 금방 제자리로 쳐진다
 const SLACK = 0.02;
 const FOV = 30;
-const GRAVITY = -4.5;
-const LINK_MASS = 5;
-const DRAG_FORCE = 230;
-const POINTER_MAX_SPEED = 4; // 마우스를 휙 지나가도 무거운 체인이 날아가지 않게 밀어내는 속도를 제한
+const GRAVITY = -45;
+const LINK_MASS = 50;
+const DRAG_FORCE = 2500; // 잡아당기는 힘의 상한 — 고리 무게(50×45)와 비슷해 버티듯 느리게 딸려 온다
+const DRAG_REACH = 0.4; // 끌어서 옮길 수 있는 최대 거리(고리 길이의 약 1/5)
+const NUDGE = 0.05; // 마우스가 훑을 때 고리에 전해지는 속도 비율(5%)
+const NUDGE_MAX_SPEED = 4; // 마우스를 휙 지나가도 이 속도 이상은 전하지 않는다
+const IMPULSE = 2.5; // 탭·스크롤로 주는 힘의 배율 — 질량이 10배라 실제로는 전보다 훨씬 덜 움직인다
 const LINK = 1, POINTER = 2;
 // 맞물린 고리는 이웃에 대해 마음대로 돌 수 없다 — 철사 굵기(2R)와 구멍 폭(2(A-R))이 허락하는 만큼만 비틀리고 꺾인다
 // 비틀림: 0.175/cosφ + 0.175·tanφ ≤ 0.245 를 풀면 약 19°, 꺾임: 반원 안쪽을 미끄러져 직선부에 닿기 전까지
@@ -198,9 +202,7 @@ flat varying float vHatchP, vChromeP;`)
   const anchorB = new CANNON.Body({ type: CANNON.Body.KINEMATIC, ...ghost });
   world.addBody(anchorA);
   world.addBody(anchorB);
-  const pointer = new CANNON.Body({ type: CANNON.Body.KINEMATIC, shape: new CANNON.Sphere(0.24), position: new CANNON.Vec3(0, 99, 0), collisionFilterGroup: POINTER, collisionFilterMask: LINK });
   const dragBody = new CANNON.Body({ type: CANNON.Body.KINEMATIC, position: new CANNON.Vec3(0, 99, 0), ...ghost });
-  world.addBody(pointer);
   world.addBody(dragBody);
 
   let links = [], joints = [], dir = new CANNON.Vec3(), perp = new CANNON.Vec3(), baseA = new CANNON.Vec3(), baseB = new CANNON.Vec3();
@@ -473,7 +475,7 @@ flat varying float vHatchP, vChromeP;`)
   const dragPlane = new THREE.Plane();
   const hitPt = new THREE.Vector3();
   const tmpV = new THREE.Vector3();
-  let pointerTarget = null, lastMove = 0, pointerActive = false, pointerOverUi = false;
+  let lastNudge = null, nudgeAt = 0, pointerOverUi = false;
   let drag = null, hoverDirty = false, hovering = false, visible = true;
   const interactive = (el) => el && el.closest && el.closest('a, button, input, textarea, select, label, [role="button"]');
 
@@ -495,18 +497,35 @@ flat varying float vHatchP, vChromeP;`)
     const inside = setRay(e);
     pointerOverUi = !!interactive(e.target);
     if (drag) {
-      if (inside && raycaster.ray.intersectPlane(dragPlane, hitPt)) drag.target.copy(hitPt);
+      // 무거운 쇠는 끌어도 잡은 자리에서 조금만 딸려 온다 — 커서가 멀리 가도 당기는 목표는 DRAG_REACH 안에 머문다
+      if (inside && raycaster.ray.intersectPlane(dragPlane, hitPt)) {
+        drag.target.copy(hitPt).sub(drag.origin);
+        if (drag.target.length() > DRAG_REACH) drag.target.setLength(DRAG_REACH);
+        drag.target.add(drag.origin);
+      }
       return;
     }
-    if (!inside) { pointerActive = false; return; }
-    facePlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tmpV).negate(), new THREE.Vector3());
-    if (raycaster.ray.intersectPlane(facePlane, hitPt)) {
-      if (!pointerActive) { pointer.position.set(hitPt.x, hitPt.y, hitPt.z); pointer.velocity.setZero(); }
-      pointerTarget = hitPt.clone();
-      pointerActive = true;
-      lastMove = performance.now();
-    }
+    if (!inside) { lastNudge = null; return; }
     hoverDirty = true;
+    // 마우스가 고리 위를 훑고 지나가면 그 방향으로 아주 약하게만 툭 — 무거운 쇠라 손이 스쳐도 거의 꿈쩍하지 않는다
+    const now = performance.now();
+    if (!physicsOn() || now - nudgeAt < 40) return;
+    facePlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tmpV).negate(), new THREE.Vector3());
+    if (!raycaster.ray.intersectPlane(facePlane, hitPt)) return;
+    if (lastNudge) {
+      const dtm = Math.max((now - nudgeAt) / 1000, 1 / 120);
+      const hit = hitLink();
+      if (hit) {
+        const b = links[hit.instanceId];
+        let vx = (hitPt.x - lastNudge.x) / dtm, vy = (hitPt.y - lastNudge.y) / dtm, vz = (hitPt.z - lastNudge.z) / dtm;
+        const sp = Math.hypot(vx, vy, vz);
+        if (sp > NUDGE_MAX_SPEED) { const s = NUDGE_MAX_SPEED / sp; vx *= s; vy *= s; vz *= s; }
+        const k = LINK_MASS * NUDGE;
+        b.applyImpulse(new CANNON.Vec3(vx * k, vy * k, vz * k), new CANNON.Vec3(hit.point.x, hit.point.y, hit.point.z));
+      }
+    }
+    lastNudge = (lastNudge || new THREE.Vector3()).copy(hitPt);
+    nudgeAt = now;
   }, { passive: true });
 
   addEventListener('pointerdown', (e) => {
@@ -516,7 +535,7 @@ flat varying float vHatchP, vChromeP;`)
     const body = links[hit.instanceId];
     const at = new CANNON.Vec3(hit.point.x, hit.point.y, hit.point.z);
     if (e.pointerType === 'touch') {
-      body.applyImpulse(new CANNON.Vec3(perp.x * 22 * (Math.random() < 0.5 ? -1 : 1), perp.y * 22, (Math.random() - 0.5) * 18), at);
+      body.applyImpulse(new CANNON.Vec3(perp.x * 22 * IMPULSE * (Math.random() < 0.5 ? -1 : 1), perp.y * 22 * IMPULSE, (Math.random() - 0.5) * 18 * IMPULSE), at);
       return;
     }
     e.preventDefault();
@@ -525,9 +544,8 @@ flat varying float vHatchP, vChromeP;`)
     const c = new CANNON.PointToPointConstraint(body, body.pointToLocalFrame(at), dragBody, new CANNON.Vec3(), DRAG_FORCE);
     world.addConstraint(c);
     dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tmpV).negate(), hit.point);
-    drag = { c, target: hit.point.clone() };
-    pointerActive = false;
-    pointer.position.set(0, 99, 0);
+    drag = { c, target: hit.point.clone(), origin: hit.point.clone() };
+    lastNudge = null;
     document.documentElement.classList.add('chain-grabbing');
   });
 
@@ -548,7 +566,7 @@ flat varying float vHatchP, vChromeP;`)
     lastScroll = scrollY;
     needsRender = true;
     if (reduceMotion || !visible || !physicsOn()) return;
-    const k = Math.min(Math.abs(dy), 60) * 0.04 * (Math.random() - 0.5) * 2;
+    const k = Math.min(Math.abs(dy), 60) * 0.04 * IMPULSE * (Math.random() - 0.5) * 2;
     const b = links[(Math.random() * N) | 0];
     b.applyImpulse(new CANNON.Vec3(perp.x * k, perp.y * k, (Math.random() - 0.5) * Math.abs(k)), b.position);
   }, { passive: true });
@@ -651,14 +669,6 @@ flat varying float vHatchP, vChromeP;`)
     steer(anchorA, tA, dt);
     steer(anchorB, tB, dt);
     if (drag) steer(dragBody, drag.target, dt);
-    if (pointerActive && !drag) {
-      if (performance.now() - lastMove > 120) pointer.velocity.setZero();
-      else {
-        steer(pointer, pointerTarget, dt);
-        const v = pointer.velocity.length();
-        if (v > POINTER_MAX_SPEED) pointer.velocity.scale(POINTER_MAX_SPEED / v, pointer.velocity);
-      }
-    }
     world.step(1 / 120, dt, 6);
     keepConnected();
   }
@@ -677,7 +687,7 @@ flat varying float vHatchP, vChromeP;`)
 
   let needsRender = true, last = performance.now(), frame = 0;
   layout();
-  if (/chaindebug/.test(location.search)) window.__chain = { get links() { return links; }, limits, simulate, perp, anchorA, anchorB, setBuild: (v) => { buildT = v; buildFrozen = v !== null; }, get buildT() { return buildT; }, morph, snap: () => { renderer.render(scene, camera); return canvas.toDataURL(); } };
+  if (/chaindebug/.test(location.search)) window.__chain = { get links() { return links; }, limits, simulate, perp, anchorA, anchorB, setBuild: (v) => { buildT = v; buildFrozen = v !== null; }, get buildT() { return buildT; }, morph, world, CANNON, dragBody, snap: () => { renderer.render(scene, camera); return canvas.toDataURL(); } };
   if (reduceMotion) {
     for (let i = 0; i < 360; i++) simulate(1 / 120);
   } else {
