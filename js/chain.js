@@ -11,6 +11,10 @@ const FOV = 30;
 const GRAVITY = -2.5;
 const DRAG_FORCE = 160;
 const LINK = 1, POINTER = 2;
+// 맞물린 고리는 이웃에 대해 마음대로 돌 수 없다 — 철사 굵기(2R)와 구멍 폭(2(A-R))이 허락하는 만큼만 비틀리고 꺾인다
+// 비틀림: 0.16/cosφ + 0.16·tanφ ≤ 0.26 을 풀면 약 27°, 꺾임: 반원 안쪽을 미끄러져 직선부에 닿기 전까지
+const TWIST_MAX = THREE.MathUtils.degToRad(25);
+const SWING_MAX = THREE.MathUtils.degToRad(62);
 
 const canvas = document.getElementById('chain-canvas');
 const pin = document.getElementById('hero-pin');
@@ -87,6 +91,20 @@ function init() {
   const tanHalf = Math.tan(THREE.MathUtils.degToRad(FOV / 2));
 
   const material = new THREE.MeshStandardMaterial({ color: 0xf2f4f8, metalness: 1, roughness: 0.08, envMapIntensity: 1.15 });
+  // 블렌더 라이브러리의 ambientCG Metal009(브러시드 스틸, CC0) — 결이 철사 길이 방향으로 흐르게 붙이고,
+  // 거칠기는 크롬답게 0.11~0.24 범위로 눌러 반사는 살리되 클로즈업에서 미세한 결과 흠집이 보이게 한다
+  const texLoader = new THREE.TextureLoader();
+  const maxAniso = renderer.capabilities.getMaxAnisotropy();
+  const metalTex = (url, apply) => texLoader.load(new URL(url, import.meta.url).href, (t) => {
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(4, 1);
+    t.anisotropy = maxAniso;
+    apply(t);
+    material.needsUpdate = true;
+    needsRender = true;
+  });
+  metalTex('../assets/tex/metal009_roughness.jpg', (t) => { material.roughnessMap = t; material.roughness = 0.35; });
+  metalTex('../assets/tex/metal009_normal.jpg', (t) => { material.normalMap = t; material.normalScale.set(0.35, 0.35); });
   const mesh = new THREE.InstancedMesh(stadium(), material, N);
   mesh.frustumCulled = false;
   scene.add(mesh);
@@ -130,6 +148,11 @@ function init() {
     // 고리의 -Y(아래 걸림점)가 체인 진행 방향을 향하도록 Z축으로 돌리고, 짝수/홀수 고리는 자기 축으로 90° 엇갈린다
     const qz = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 0, 1), Math.PI / 2 - th);
     const qTwist = qz.mult(new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.PI / 2));
+    // 양 끝 고정점도 '보이지 않는 고리'로 방향을 가져, 끝 고리가 고정점에서 팽이처럼 돌지 않는다
+    anchorA.quaternion.copy(qTwist);
+    anchorB.quaternion.copy(N % 2 ? qTwist : qz);
+    anchorA.angularVelocity.setZero();
+    anchorB.angularVelocity.setZero();
     for (let i = 0; i < N; i++) {
       const d = (HALF + i * PITCH) * (1 - SLACK);
       const b = new CANNON.Body({
@@ -301,9 +324,71 @@ function init() {
 
   // ----- 시뮬레이션 -----
   const pw = new CANNON.Vec3(), cw = new CANNON.Vec3();
+  // 이웃 고리 사이의 상대 회전을 '비틀림(긴 축)'과 '꺾임'으로 나눠, 맞물린 철사가 허락하는 범위 밖이면 경계로 되돌린다
+  const Y = new THREE.Vector3(0, 1, 0);
+  const qRel0 = new THREE.Quaternion().setFromAxisAngle(Y, Math.PI / 2);
+  const qRel0Inv = qRel0.clone().invert();
+  const qp = new THREE.Quaternion(), qc = new THREE.Quaternion(), dev = new THREE.Quaternion();
+  const tw = new THREE.Quaternion(), sw = new THREE.Quaternion(), tgt = new THREE.Quaternion();
+  const delta = new THREE.Quaternion(), part = new THREE.Quaternion(), jointFrame = new THREE.Quaternion();
+  const axis = new THREE.Vector3();
+  const limits = { twist: 0, swing: 0 };
+  function wrapHalf(a) { return a > Math.PI / 2 ? a - Math.PI : a < -Math.PI / 2 ? a + Math.PI : a; }
+  function removeSpin(pb, cb, wp, wc, n, outward) {
+    const rel = (cb.angularVelocity.x - pb.angularVelocity.x) * n.x + (cb.angularVelocity.y - pb.angularVelocity.y) * n.y + (cb.angularVelocity.z - pb.angularVelocity.z) * n.z;
+    if (rel * outward <= 0) return;
+    cb.angularVelocity.x -= n.x * rel * wc; cb.angularVelocity.y -= n.y * rel * wc; cb.angularVelocity.z -= n.z * rel * wc;
+    pb.angularVelocity.x += n.x * rel * wp; pb.angularVelocity.y += n.y * rel * wp; pb.angularVelocity.z += n.z * rel * wp;
+  }
+  function limitJoint(pb, cb, wp, wc) {
+    qp.set(pb.quaternion.x, pb.quaternion.y, pb.quaternion.z, pb.quaternion.w);
+    qc.set(cb.quaternion.x, cb.quaternion.y, cb.quaternion.z, cb.quaternion.w);
+    // 이상적인 맞물림(긴 축으로 90° 엇갈림)에서 얼마나 벗어났는지
+    dev.copy(qp).invert().multiply(qc).premultiply(qRel0Inv);
+    const tl = Math.hypot(dev.y, dev.w);
+    if (tl < 1e-6) return;
+    const phi = 2 * Math.atan2(dev.y, dev.w);
+    tw.set(0, dev.y / tl, 0, dev.w / tl);
+    sw.copy(dev).multiply(tw.clone().invert());
+    if (sw.w < 0) sw.set(-sw.x, -sw.y, -sw.z, -sw.w);
+    // 고리는 긴 축으로 180° 돌리면 같은 모양이라, 비틀림은 ±90° 범위로 접어서 잰다
+    const phiW = wrapHalf(((phi + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI);
+    const theta = 2 * Math.acos(Math.min(1, sw.w));
+    limits.twist = Math.max(limits.twist, Math.abs(phiW));
+    limits.swing = Math.max(limits.swing, theta);
+    const overT = Math.abs(phiW) > TWIST_MAX, overS = theta > SWING_MAX;
+    if (!overT && !overS) return;
+    jointFrame.copy(qp).multiply(qRel0);
+    if (overT) {
+      tw.setFromAxisAngle(Y, phi - phiW + Math.sign(phiW) * TWIST_MAX);
+      axis.copy(Y).applyQuaternion(jointFrame);
+      removeSpin(pb, cb, wp, wc, axis, Math.sign(phiW));
+    }
+    if (overS) {
+      axis.set(sw.x, sw.y, sw.z).normalize();
+      sw.setFromAxisAngle(axis, SWING_MAX);
+      axis.applyQuaternion(jointFrame);
+      removeSpin(pb, cb, wp, wc, axis, 1);
+    }
+    tgt.copy(qp).multiply(qRel0).multiply(sw).multiply(tw);
+    delta.copy(tgt).multiply(qc.clone().invert());
+    if (delta.w < 0) delta.set(-delta.x, -delta.y, -delta.z, -delta.w);
+    if (wc > 0) { part.identity().slerp(delta, wc).multiply(qc); cb.quaternion.set(part.x, part.y, part.z, part.w); }
+    if (wp > 0) { part.identity().slerp(delta.clone().invert(), wp).multiply(qp); pb.quaternion.set(part.x, part.y, part.z, part.w); }
+  }
+  function limitTwist() {
+    for (let j = 0; j <= N; j++) {
+      const pb = j === 0 ? anchorA : links[j - 1];
+      const cb = j === N ? anchorB : links[j];
+      limitJoint(pb, cb, j === 0 ? 0 : j === N ? 1 : 0.5, j === 0 ? 1 : j === N ? 0 : 0.5);
+    }
+  }
+
   function keepConnected() {
     // 구속이 강한 힘에 밀려 벌어져도 양 끝에서 번갈아 다시 붙여, 클로즈업에서도 틈이 보이지 않게 한다
-    for (let pass = 0; pass < 4; pass++) {
+    // 앞 4번은 회전 제한과 번갈아, 뒤 4번은 위치만 다시 맞춰 마지막에 틈이 남지 않게 한다
+    for (let pass = 0; pass < 20; pass++) {
+      if (pass < 4) limitTwist();
       for (let j = 0; j <= N; j++) {
         if (j === 0) pw.copy(anchorA.position); else links[j - 1].pointToWorldFrame(PIV_BOTTOM, pw);
         if (j === N) cw.copy(anchorB.position); else links[j].pointToWorldFrame(PIV_TOP, cw);
@@ -355,6 +440,7 @@ function init() {
 
   let needsRender = true, last = performance.now(), frame = 0;
   layout();
+  if (/chaindebug/.test(location.search)) window.__chain = { get links() { return links; }, limits, simulate, perp, anchorA, anchorB };
   if (reduceMotion) {
     for (let i = 0; i < 360; i++) simulate(1 / 120);
   } else {
