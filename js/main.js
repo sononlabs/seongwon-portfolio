@@ -1,3 +1,8 @@
+// 새로고침해도 맨 위(펜 인트로)부터 보여 준다 — 브라우저가 이전 스크롤 위치를 되살리면 인트로가 중간부터 시작된다.
+// 주소에 #work 같은 앵커가 있으면 그 자리로 가는 기본 동작은 그대로 둔다
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+if (!location.hash) scrollTo(0, 0);
+
 // Nav scroll state — 히어로 핀 구간에서는 배경 없이 두어 체인 클로즈업을 가리지 않는다
 const nav = document.getElementById('nav');
 const heroPin = document.getElementById('hero-pin');

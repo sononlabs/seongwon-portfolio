@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
+import { MeshBVH, MeshBVHUniformStruct, shaderStructs, shaderIntersectFunction } from 'three-mesh-bvh';
 
 // 고리 하나의 형태: 가로 a(반원 반지름), 직선부 s, 철사 두께 r — 피치(고리 간 거리)는 안쪽 길이와 같다
 const A = 0.42, S = 0.72, R = 0.175;
@@ -13,6 +14,7 @@ const T = {
   outer: [0.03, 0.30], hop: [0.30, 0.34], inner: [0.34, 0.50],
   hatch: [0.50, 0.66], chrome: [0.64, 0.84], inflate: [0.62, 0.82],
   lineFade: [0.66, 0.78], wave: [0.80, 1.0], camera: [0.78, 1.0], physics: 0.80,
+  set: [0.82, 0.98], // 가운데 고리에 다이아몬드가 박히는 구간
 };
 // 무게감: 고리 하나가 약 1.9 단위 — 실제 크기로 치면 중력이 훨씬 세야 '무거운 쇠'로 보인다(약하면 달 위처럼 둥실 뜬다).
 // 그래서 중력을 크게 두어 놓으면 툭 떨어지고 축 늘어지며, 질량도 커서 쳐도 조금만 밀리고 금방 제자리로 쳐진다
@@ -30,14 +32,18 @@ const LINK = 1, POINTER = 2;
 // 비틀림: 0.175/cosφ + 0.175·tanφ ≤ 0.245 를 풀면 약 19°, 꺾임: 반원 안쪽을 미끄러져 직선부에 닿기 전까지
 const TWIST_MAX = THREE.MathUtils.degToRad(18);
 const SWING_MAX = THREE.MathUtils.degToRad(62);
+const LOOP = 2 * S + 2 * Math.PI * A; // 고리 중심선 한 바퀴 길이
+// 가운데 고리: 플래티넘(로듐 도금) 고리에 라운드 브릴리언트 컷 다이아몬드를 촘촘히 박은 파베 세팅.
+// 기둥(열) 수, 돌 반지름, 같은 열 안 돌 간격, 고리 안쪽(구멍 쪽)에서 비워 두는 각도(이웃 고리가 지나가는 자리)
+const PAVE_COLS = 10, STONE_R = 0.046, STONE_GAP = 0.101, PAVE_SKIP = 0.6;
 
 const canvas = document.getElementById('chain-canvas');
 const pin = document.getElementById('hero-pin');
 if (canvas && pin) init();
 
-function stadium() {
+function stadiumCurve() {
   const curve = new THREE.Curve();
-  const total = 2 * S + 2 * Math.PI * A;
+  const total = LOOP;
   curve.getPoint = (t, target = new THREE.Vector3()) => {
     let d = t * total;
     if (d < S) return target.set(A, -S / 2 + d, 0);
@@ -49,7 +55,161 @@ function stadium() {
     const th = Math.PI + d / A;
     return target.set(A * Math.cos(th), -S / 2 + A * Math.sin(th), 0);
   };
-  return new THREE.TubeGeometry(curve, 120, R, 28, true);
+  return curve;
+}
+
+function stadium() {
+  return new THREE.TubeGeometry(stadiumCurve(), 120, R, 28, true);
+}
+
+// 라운드 브릴리언트 컷(57면에 가까운 실제 컷 구조) — 거들 반지름 1, 돌의 위쪽이 +Y.
+// 테이블(8각) · 스타 8 · 베젤(카이트) 8 · 상부 거들 16 · 거들 띠 · 하부 거들 16 · 파빌리온 메인 8 → 큘릿.
+// 비율은 이상적 컷(Tolkowsky)에 가깝게: 테이블 56%, 크라운 높이 16%, 파빌리온 깊이 43%
+function brilliantGeometry() {
+  const TABLE = 0.56, CROWN = 0.16, PAV = 0.43, GIRD = 0.015, STAR_R = 0.78, LOWER_R = 0.45;
+  const crownY = (r) => GIRD + CROWN * (1 - r) / (1 - TABLE);
+  const pavY = (r) => -GIRD - PAV * (1 - r);
+  const pt = (r, a, y) => [r * Math.cos(a), y, r * Math.sin(a)];
+  const T = [], Sx = [], G = [], Gb = [], L = [];
+  for (let k = 0; k < 8; k++) {
+    const a = (k * Math.PI) / 4;
+    T.push(pt(TABLE, a, GIRD + CROWN));
+    Sx.push(pt(STAR_R, a + Math.PI / 8, crownY(STAR_R)));
+    L.push(pt(LOWER_R, a + Math.PI / 8, pavY(LOWER_R)));
+  }
+  for (let j = 0; j < 16; j++) {
+    const a = (j * Math.PI) / 8;
+    G.push(pt(1, a, GIRD));
+    Gb.push(pt(1, a, -GIRD));
+  }
+  const top = [0, GIRD + CROWN, 0], culet = [0, -GIRD - PAV, 0];
+  const tris = [];
+  const w = (i, n) => (i + n) % n;
+  for (let k = 0; k < 8; k++) {
+    const k1 = w(k + 1, 8), km = w(k - 1, 8), g0 = 2 * k, g1 = w(2 * k + 1, 16), g2 = w(2 * k + 2, 16);
+    tris.push([top, T[k], T[k1]]); // 테이블
+    tris.push([T[k], Sx[k], T[k1]]); // 스타
+    tris.push([T[k], Sx[km], G[g0]], [T[k], G[g0], Sx[k]]); // 베젤(카이트)
+    tris.push([Sx[k], G[g0], G[g1]], [Sx[k], G[g1], G[g2]]); // 상부 거들
+    tris.push([Gb[g0], Gb[g1], L[k]], [Gb[g1], Gb[g2], L[k]]); // 하부 거들
+    tris.push([Gb[g2], culet, L[k]], [culet, Gb[g0], L[k]]); // 파빌리온 메인
+  }
+  for (let j = 0; j < 16; j++) {
+    const j1 = w(j + 1, 16);
+    tris.push([G[j], Gb[j], Gb[j1]], [G[j], Gb[j1], G[j1]]); // 거들 띠
+  }
+  const pos = [];
+  const v = new THREE.Vector3(), e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), c = new THREE.Vector3();
+  for (const [a, b, d] of tris) {
+    // 모든 면이 바깥을 보도록 감는 방향을 맞춘다(볼록한 돌이라 면 중심과 법선이 같은 쪽이면 바깥)
+    e1.fromArray(b).sub(v.fromArray(a));
+    e2.fromArray(d).sub(v.fromArray(a));
+    c.fromArray(a).add(v.fromArray(b)).add(v.fromArray(d));
+    if (e1.cross(e2).dot(c) < 0) pos.push(...a, ...d, ...b); else pos.push(...a, ...b, ...d);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  // 면마다 고정된 난수(반짝임 주기·반짝이는 면 여부)
+  const tri = pos.length / 9, facet = new Float32Array(tri * 9);
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let t = 0; t < tri; t++) {
+    const a = rnd(), b = rnd(), d = rnd();
+    for (let k = 0; k < 3; k++) facet.set([a, b, d], (t * 3 + k) * 3);
+  }
+  geo.setAttribute('aFacet', new THREE.BufferAttribute(facet, 3));
+  return geo;
+}
+
+// 파베 배치: 철사 둘레를 여러 열로 나눠, 열마다 그 열이 지나는 실제 길이를 따라 돌을 같은 간격으로 놓는다
+// (반원 안쪽 열은 길이가 짧아 돌이 적게, 바깥 열은 많이 들어가 겹치지 않는다). 돌 사이마다 고정용 발(구슬)을 둔다
+function paveLayout() {
+  const curve = stadiumCurve();
+  const NF = 800;
+  // 고리는 xy 평면 위를 반시계로 도는 곡선 — 법선은 '고리 안쪽(구멍)', 종법선은 z(정면)로 직접 잡는다
+  const P = [], tangents = [], normals = [], binormals = [];
+  const Z = new THREE.Vector3(0, 0, 1);
+  for (let i = 0; i <= NF; i++) {
+    P.push(curve.getPointAt(i / NF));
+    const t = curve.getTangentAt(i / NF);
+    tangents.push(t);
+    normals.push(new THREE.Vector3().crossVectors(Z, t).normalize());
+    binormals.push(Z);
+  }
+  const span = 2 * Math.PI - 2 * PAVE_SKIP, step = span / (PAVE_COLS - 1);
+  const dirAt = (i, th, out) => out.copy(normals[i % NF]).multiplyScalar(Math.cos(th)).addScaledVector(binormals[i % NF], Math.sin(th));
+  const stones = [], beads = [];
+  const d = new THREE.Vector3(), x = new THREE.Vector3(), z = new THREE.Vector3(), p = new THREE.Vector3(), m = new THREE.Matrix4();
+  for (let j = 0; j < PAVE_COLS; j++) {
+    const th = PAVE_SKIP + j * step;
+    const len = [0];
+    const q = new THREE.Vector3(), q0 = new THREE.Vector3();
+    for (let i = 1; i <= NF; i++) {
+      q0.copy(P[i - 1]).addScaledVector(dirAt(i - 1, th, d), R);
+      q.copy(P[i]).addScaledVector(dirAt(i, th, d), R);
+      len.push(len[i - 1] + q.distanceTo(q0));
+    }
+    const total = len[NF], n = Math.max(1, Math.floor(total / STONE_GAP)), gap = total / n;
+    const indexAt = (s) => { let lo = 0, hi = NF; while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (len[mid] < s) lo = mid; else hi = mid; } return lo; };
+    for (let k = 0; k < n; k++) {
+      const s = (k + (j % 2 ? 0.5 : 0)) * gap;
+      const i = indexAt(s);
+      dirAt(i, th, d).normalize();
+      x.copy(tangents[i % NF]).addScaledVector(d, -tangents[i % NF].dot(d)).normalize();
+      z.crossVectors(x, d);
+      p.copy(P[i]).addScaledVector(d, R + STONE_R * 0.04);
+      m.makeBasis(x, d, z).scale(new THREE.Vector3(STONE_R, STONE_R, STONE_R)).setPosition(p);
+      stones.push({ m: m.clone(), u: i / NF });
+      // 발: 이 돌과 옆 열 돌 사이(반 칸 옆, 반 간격 뒤)
+      if (j < PAVE_COLS - 1) {
+        const ib = indexAt((s + gap / 2) % total);
+        const db = dirAt(ib, th + step / 2, new THREE.Vector3()).normalize();
+        beads.push({ p: new THREE.Vector3().copy(P[ib]).addScaledVector(db, R + 0.004), u: ib / NF });
+      }
+    }
+  }
+  return { stones, beads };
+}
+
+// HDR을 웹용으로 가볍게: 보통 밝기(base, sRGB JPG)와 밝은 부분만 1/64로 줄여 담은 JPG(high) 두 장을 받아
+// 브라우저에서 다시 HDR(반정밀 부동소수) 텍스처로 합친다 — 2K 기준 약 0.3MB(원본 .hdr은 6MB)
+function loadHdrJpg(name, done) {
+  const load = (k) => new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = rej;
+    im.src = new URL(`../assets/hdr/${name}_${k}.jpg`, import.meta.url).href;
+  });
+  Promise.all([load('base'), load('high')]).then(([b, h]) => {
+    const W = b.width, H = b.height;
+    const read = (im) => { const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d'); x.drawImage(im, 0, 0); return x.getImageData(0, 0, W, H).data; };
+    const B = read(b), Hi = read(h);
+    const lin = new Float32Array(256);
+    for (let i = 0; i < 256; i++) { const c = i / 255; lin[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+    const out = new Uint16Array(W * H * 4);
+    const one = THREE.DataUtils.toHalfFloat(1);
+    for (let y = 0; y < H; y++) {
+      // 등장방형 텍스처는 v=1이 하늘 — 이미지 위쪽 줄을 텍스처 마지막 줄로 넣는다
+      const row = (H - 1 - y) * W * 4, src = y * W * 4;
+      for (let xx = 0; xx < W; xx++) {
+        const o = row + xx * 4, s = src + xx * 4;
+        for (let ch = 0; ch < 3; ch++) {
+          const vb = B[s + ch];
+          const v = vb < 250 ? lin[vb] : Math.max(lin[vb], lin[Hi[s + ch]] * 64);
+          out[o + ch] = THREE.DataUtils.toHalfFloat(v);
+        }
+        out[o + 3] = one;
+      }
+    }
+    const tex = new THREE.DataTexture(out, W, H, THREE.RGBAFormat, THREE.HalfFloatType);
+    tex.colorSpace = THREE.LinearSRGBColorSpace;
+    tex.minFilter = tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    tex.needsUpdate = true;
+    done(tex);
+  });
 }
 
 // 크롬은 비치는 환경이 곧 색이다 — 어두운 스튜디오에 밝은 조명 띠를 둘러 대비 강한 반사를 만든다
@@ -105,56 +265,71 @@ function init() {
   const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 200);
   const tanHalf = Math.tan(THREE.MathUtils.degToRad(FOV / 2));
 
-  const material = new THREE.MeshStandardMaterial({ color: 0xf2f4f8, metalness: 1, roughness: 0.08, envMapIntensity: 1.15 });
-  // 블렌더 라이브러리의 ambientCG Metal009(브러시드 스틸, CC0) — 결이 철사 길이 방향으로 흐르게 붙이고,
-  // 거칠기는 크롬답게 0.11~0.24 범위로 눌러 반사는 살리되 클로즈업에서 미세한 결과 흠집이 보이게 한다
+  // 실사 환경 반사: Poly Haven 'studio_small_09'(CC0, 4K 원본을 2K로) — 팔각 소프트박스와 흰 호리존트가 있는 실제 사진 스튜디오.
+  // 주얼리 촬영과 같은 조명이라 다이아몬드에 흰빛·검은 면의 대비가 또렷하게 생긴다.
+  // 쇠·플래티넘은 이를 흐린 반사(PMREM)로, 다이아몬드는 원본을 광선 방향으로 직접 읽는다. 받는 동안은 위의 합성 스튜디오로 먼저 그린다
+  const ENV_ROT = 0.6;
+  loadHdrJpg('studio2k', (tex) => {
+    const pm = new THREE.PMREMGenerator(renderer);
+    scene.environment = pm.fromEquirectangular(tex).texture;
+    pm.dispose();
+    stoneU.envMap.value = tex;
+    needsRender = true;
+  });
+  scene.environmentRotation.set(0, ENV_ROT, 0);
+
+  // 일반 고리: ambientCG 실사 PBR 세트 Metal024(CC0) — 색·거칠기·금속도·노멀 네 장을 모두 써서 쓸린 자국과 얼룩이 있는 진짜 쇠로 만든다
+  const MET = 'metal024';
+  const material = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 1, roughness: 1, envMapIntensity: 1.0 });
   const texLoader = new THREE.TextureLoader();
   const maxAniso = renderer.capabilities.getMaxAnisotropy();
-  const metalTex = (url, apply) => texLoader.load(new URL(url, import.meta.url).href, (t) => {
+  const metalTex = (kind, apply) => texLoader.load(new URL(`../assets/tex/${MET}_${kind}.jpg`, import.meta.url).href, (t) => {
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    t.repeat.set(4, 1);
+    t.repeat.set(4, 1); // 철사 길이 방향 4번, 둘레 1번 — 한 장이 약 1×1.1 단위로 거의 정사각형으로 붙는다
     t.anisotropy = maxAniso;
     apply(t);
     material.needsUpdate = true;
     needsRender = true;
   });
-  metalTex('../assets/tex/metal009_roughness.jpg', (t) => { material.roughnessMap = t; material.roughness = 0.35; });
-  metalTex('../assets/tex/metal009_normal.jpg', (t) => { material.normalMap = t; material.normalScale.set(0.35, 0.35); });
+  metalTex('color', (t) => { t.colorSpace = THREE.SRGBColorSpace; material.map = t; });
+  metalTex('roughness', (t) => { material.roughnessMap = t; });
+  metalTex('metalness', (t) => { material.metalnessMap = t; });
+  metalTex('normal', (t) => { material.normalMap = t; material.normalScale.set(1, 1); });
 
   // ----- 그림 → 철 전환 셰이더 -----
   // 펜이 그린 순서(철사 길이 방향 uv.x)를 따라 빗금이 채워지고, 같은 방향으로 납작한 평면이 둥근 철사로 부풀며 크롬이 된다.
-  // 첫 고리(aDelay < 0)는 uHatch·uChrome·uInflate를 그대로 따르고, 나머지 고리는 uWave에 맞춰 차례로 같은 과정을 빠르게 거친다
+  // 펜이 그린 가운데 고리(다이아몬드)는 uHatch·uChrome·uInflate를 그대로 따르고, 나머지 고리는 uWave에 맞춰 차례로 같은 과정을 빠르게 거친다
+  // 가운데 고리(MID)는 따로 떼어 낸 메시라, 인스턴스는 나머지 고리만 담는다
+  const OTHERS = [...Array(N).keys()].filter((i) => i !== MID);
   const geometry = stadium();
   const uvAttr = geometry.attributes.uv;
   const along = new Float32Array(uvAttr.count);
   for (let i = 0; i < uvAttr.count; i++) along[i] = uvAttr.getX(i);
   geometry.setAttribute('aU', new THREE.BufferAttribute(along, 1));
-  const delays = new Float32Array(N);
-  for (let i = 0; i < N; i++) delays[i] = i === MID ? -1 : Math.abs(i - MID) * 0.15;
+  const delays = new Float32Array(OTHERS.map((i) => Math.abs(i - MID) * 0.15));
   geometry.setAttribute('aDelay', new THREE.InstancedBufferAttribute(delays, 1));
   const morph = {
-    uHatch: { value: 0 }, uChrome: { value: 0 }, uInflate: { value: 0 }, uWave: { value: 0 },
+    uHatch: { value: 0 }, uChrome: { value: 0 }, uInflate: { value: 0 }, uWave: { value: 0 }, uSet: { value: 0 },
     uPR: { value: 1 },
     uFill: { value: new THREE.Vector3(0x0e / 255, 0x12 / 255, 0x1a / 255) },
     uLine: { value: new THREE.Vector3(0x5a / 255, 0xa6 / 255, 0xff / 255) },
   };
-  material.onBeforeCompile = (sh) => {
+  // hero=true: 가운데 고리 — 펜이 그린 그 고리라 uHatch·uChrome·uInflate를 그대로 따른다
+  function patchMorph(sh, hero = false) {
     Object.assign(sh.uniforms, morph);
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
 attribute float aU;
-attribute float aDelay;
+${hero ? '' : 'attribute float aDelay;'}
 uniform float uHatch, uChrome, uInflate, uWave;
 varying float vU;
 flat varying float vHatchP, vChromeP;`)
       .replace('#include <beginnormal_vertex>', `float inflateP;
-if (aDelay < 0.0) { vHatchP = uHatch; vChromeP = uChrome; inflateP = uInflate; }
-else {
-  float w = clamp((uWave - aDelay) / 0.4, 0.0, 1.0);
-  vHatchP = w > 0.0 ? 1.01 : -1.0;
-  vChromeP = smoothstep(0.2, 0.9, w) * 1.04;
-  inflateP = smoothstep(0.15, 0.85, w);
-}
+${hero ? 'vHatchP = uHatch; vChromeP = uChrome; inflateP = uInflate;' : `
+float w = clamp((uWave - aDelay) / 0.4, 0.0, 1.0);
+vHatchP = w > 0.0 ? 1.01 : -1.0;
+vChromeP = smoothstep(0.2, 0.9, w) * 1.04;
+inflateP = smoothstep(0.15, 0.85, w);`}
 // 완전히 0이면 삼각형이 선처럼 찌그러져 보간 오차가 점으로 새어 나온다 — 정면에선 보이지 않을 만큼의 두께를 남긴다
 inflateP = max(inflateP, 0.03);
 vU = aU;
@@ -181,11 +356,196 @@ flat varying float vHatchP, vChromeP;`)
   float front = vHatchP < 1.0 ? exp(-abs(vU - vHatchP) * 160.0) : 0.0;
   gl_FragColor.rgb = mix(flatCol, gl_FragColor.rgb, chromeAmt) + (seam * 0.9 + front * 0.6) * vec3(0.55, 0.78, 1.0);
   gl_FragColor.a = 1.0;`);
-  };
+  }
+  material.onBeforeCompile = (sh) => patchMorph(sh);
 
-  const mesh = new THREE.InstancedMesh(geometry, material, N);
+  const mesh = new THREE.InstancedMesh(geometry, material, OTHERS.length);
   mesh.frustumCulled = false;
   scene.add(mesh);
+
+  // ----- 가운데 고리: 파베 다이아몬드 주얼리 -----
+  // 플래티넘(로듐 도금) 고리 + 라운드 브릴리언트 컷 다이아몬드 수백 알 + 돌을 잡는 발(구슬).
+  // 고리는 다른 고리처럼 펜 인트로를 거치고(빗금 → 금속), 다이아몬드와 발은 그 뒤 펜이 그린 순서대로 박힌다
+  const heroFx = { uTime: { value: 0 }, uEnergy: { value: 1 } };
+  const heroGroup = new THREE.Group();
+  scene.add(heroGroup);
+  const platinum = { color: 0xe4e6eb, metalness: 1, roughness: 0.3, envMapIntensity: 1.1 };
+
+  const tubeGeo = new THREE.TubeGeometry(stadiumCurve(), 360, R, 64, true);
+  {
+    const uv = tubeGeo.attributes.uv, au = new Float32Array(uv.count);
+    for (let i = 0; i < uv.count; i++) au[i] = uv.getX(i);
+    tubeGeo.setAttribute('aU', new THREE.BufferAttribute(au, 1));
+  }
+  const tubeMat = new THREE.MeshPhysicalMaterial(platinum);
+  // 손때와 헤어라인 흠집: Metal009 거칠기 맵을 약하게 — 거울 같은 반사 속에 결이 살짝 비친다
+  texLoader.load(new URL('../assets/tex/metal009_roughness.jpg', import.meta.url).href, (t) => {
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(10, 1);
+    t.anisotropy = maxAniso;
+    tubeMat.roughnessMap = t;
+    tubeMat.needsUpdate = true;
+    needsRender = true;
+  });
+  tubeMat.onBeforeCompile = (sh) => patchMorph(sh, true);
+  const heroTube = new THREE.Mesh(tubeGeo, tubeMat);
+  heroTube.frustumCulled = false;
+  heroGroup.add(heroTube);
+
+  const { stones, beads } = paveLayout();
+  // 다이아몬드: 픽셀마다 시선을 돌 속으로 굴절시킨 뒤, 실제 브릴리언트 컷 형상(BVH, three-mesh-bvh)에 부딪히며
+  // 전반사로 최대 4번 튕기다 빠져나간 방향의 스튜디오 조명을 읽는다. 빨강·초록·파랑의 굴절률을 달리 추적해 무지개빛이 갈라진다
+  // (@react-three/drei MeshRefractionMaterial과 같은 방식, MIT). 돌마다 행렬이 달라 인스턴스별로 광선을 돌 좌표로 옮긴다
+  const stoneGeo = brilliantGeometry();
+  const stoneBVH = new MeshBVH(stoneGeo);
+  const bvhStruct = new MeshBVHUniformStruct();
+  bvhStruct.updateFrom(stoneBVH);
+  const stoneU = {
+    envMap: { value: null },
+    bvh: { value: bvhStruct },
+    bounces: { value: 4 },
+    ior: { value: 2.42 },
+    aberrationStrength: { value: 0.018 },
+    uExposure: { value: 1.3 },
+    uTint: { value: new THREE.Color(1, 1, 1) },
+    uEnvRot: { value: new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationY(-ENV_ROT)) },
+  };
+  // 휴대폰(터치 기기)은 GPU가 약해 내부 반사 횟수를 2번으로 줄인다 — 화면이 작아 차이는 거의 보이지 않는다
+  if (matchMedia('(pointer: coarse)').matches) stoneU.bounces.value = 2;
+  const stoneMat = new THREE.ShaderMaterial({
+    uniforms: { ...stoneU, ...heroFx, uSet: morph.uSet, uInflate: morph.uInflate },
+    vertexShader: /* glsl */ `
+uniform float uInflate, uSet;
+attribute vec3 aFacet;
+attribute float aU, aSeed;
+varying vec3 vWorldPosition, vNormal;
+varying mat4 vM, vMinv;
+flat varying vec3 vFacet;
+flat varying float vSeed;
+void main() {
+  // 고리가 다 부풀어 금속이 된 뒤, 펜이 그린 순서대로 돌이 톡톡 박힌다(uSet). 납작함(uInflate)도 고리와 똑같이 따른다
+  float reveal = smoothstep(aU - 0.005, aU + 0.03, uSet);
+  mat4 m = modelMatrix * instanceMatrix;
+  vM = m;
+  vMinv = inverse(m);
+  vec4 lp = instanceMatrix * vec4(position * reveal, 1.0);
+  lp.z *= max(uInflate, 0.03);
+  vec4 wp = modelMatrix * lp;
+  vWorldPosition = wp.xyz;
+  vNormal = normalize(mat3(m) * normal);
+  vFacet = aFacet;
+  vSeed = aSeed;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}`,
+    fragmentShader: /* glsl */ `
+precision highp isampler2D;
+precision highp usampler2D;
+varying vec3 vWorldPosition, vNormal;
+varying mat4 vM, vMinv;
+flat varying vec3 vFacet;
+flat varying float vSeed;
+uniform sampler2D envMap;
+uniform float bounces, ior, aberrationStrength, uExposure;
+${shaderStructs}
+${shaderIntersectFunction}
+uniform BVH bvh;
+uniform mat3 uEnvRot;
+uniform vec3 uTint;
+uniform float uTime, uEnergy;
+
+// 돌 속으로 굴절해 들어간 광선이 안쪽 면에 부딪힐 때마다, 빠져나갈 수 있으면 굴절해 나가고 아니면(전반사) 다시 튕긴다
+vec3 totalInternalReflection(vec3 rd, vec3 normal, float eta) {
+  vec3 rayDirection = refract(rd, normal, 1.0 / eta);
+  vec3 rayOrigin = (vMinv * vec4(vWorldPosition + rayDirection * 0.0005, 1.0)).xyz;
+  rayDirection = normalize((vMinv * vec4(rayDirection, 0.0)).xyz);
+  for (float i = 0.0; i < bounces; i++) {
+    uvec4 faceIndices = uvec4(0u);
+    vec3 faceNormal = vec3(0.0, 0.0, 1.0);
+    vec3 barycoord = vec3(0.0);
+    float side = 1.0;
+    float dist = 0.0;
+    bvhIntersectFirstHit(bvh, rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist);
+    vec3 hitPos = rayOrigin + rayDirection * max(dist - 0.001, 0.0);
+    vec3 tempDir = refract(rayDirection, faceNormal, eta);
+    if (length(tempDir) != 0.0) { rayDirection = tempDir; break; }
+    rayDirection = reflect(rayDirection, faceNormal);
+    rayOrigin = hitPos + rayDirection * 0.01;
+  }
+  return normalize((vM * vec4(rayDirection, 0.0)).xyz);
+}
+
+#include <common>
+
+// 굴절 방향은 면 경계에서 크게 튀므로, 밉맵 기울기는 매끈한 시선 방향으로 계산해 경계에 줄무늬가 생기지 않게 한다
+vec3 sampleEnv(vec3 dir, vec3 smoothDir) {
+  vec2 uvv = equirectUv(uEnvRot * dir);
+  vec2 suv = equirectUv(uEnvRot * smoothDir);
+  return textureGrad(envMap, uvv, dFdx(suv), dFdy(suv)).rgb;
+}
+
+void main() {
+  vec3 normal = normalize(vNormal);
+  vec3 rd = normalize(vWorldPosition - cameraPosition);
+  if (dot(rd, normal) > 0.0) normal = -normal;
+  vec3 dG = totalInternalReflection(rd, normal, ior);
+  vec3 dR = totalInternalReflection(rd, normal, ior * (1.0 - aberrationStrength));
+  vec3 dB = totalInternalReflection(rd, normal, ior * (1.0 + aberrationStrength));
+  vec3 col = vec3(sampleEnv(dR, rd).r, sampleEnv(dG, rd).g, sampleEnv(dB, rd).b) * uExposure * uTint;
+  // 겉면 반사(프레넬, 굴절률 2.42 → 정면에서도 17%)
+  vec3 rf = reflect(rd, normal);
+  float F = 0.172 + 0.828 * pow(1.0 - clamp(dot(-rd, normal), 0.0, 1.0), 5.0);
+  col = mix(col, sampleEnv(rf, rd) * uExposure, F);
+  // 반짝임: 일부 면이 돌마다 제각각 주기로 번쩍 — 올리면(uEnergy↑) 반짝이는 면이 늘고 세진다
+  vec3 h = vFacet;
+  float tw = pow(max(0.0, sin(uTime * (1.2 + h.y * 2.4) + h.x * 60.0 + vSeed * 37.0)), 40.0)
+           * step(0.8 - 0.12 * (uEnergy - 1.0), fract(h.z + vSeed * 7.31));
+  col += vec3(1.0, 0.97, 0.92) * tw * 3.0 * uEnergy;
+  gl_FragColor = vec4(col, 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`,
+  });
+  const stoneMesh = new THREE.InstancedMesh(stoneGeo, stoneMat, stones.length);
+  {
+    const au = new Float32Array(stones.length), seed = new Float32Array(stones.length);
+    stones.forEach((s, i) => { stoneMesh.setMatrixAt(i, s.m); au[i] = s.u; seed[i] = (i * 0.618034) % 1; });
+    stoneGeo.setAttribute('aU', new THREE.InstancedBufferAttribute(au, 1));
+    stoneGeo.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seed, 1));
+  }
+  stoneMesh.frustumCulled = false;
+  stoneMesh.raycast = () => {};
+  heroGroup.add(stoneMesh);
+
+  // 발(프롱): 돌 사이마다 작은 플래티넘 구슬 — 실제 파베 세팅처럼 돌을 눌러 잡는다
+  const beadGeo = new THREE.SphereGeometry(0.014, 12, 8);
+  beadGeo.setAttribute('aU', new THREE.InstancedBufferAttribute(new Float32Array(beads.map((b) => b.u)), 1));
+  const beadMat = new THREE.MeshPhysicalMaterial({ ...platinum, roughness: 0.18 });
+  beadMat.onBeforeCompile = (sh) => {
+    sh.uniforms.uSet = morph.uSet;
+    sh.uniforms.uInflate = morph.uInflate;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>
+attribute float aU;
+uniform float uSet, uInflate;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+transformed *= smoothstep(aU - 0.005, aU + 0.03, uSet);`)
+      .replace('#include <project_vertex>', `vec4 mvPosition = vec4(transformed, 1.0);
+#ifdef USE_INSTANCING
+mvPosition = instanceMatrix * mvPosition;
+#endif
+mvPosition.z *= max(uInflate, 0.03);
+mvPosition = modelViewMatrix * mvPosition;
+gl_Position = projectionMatrix * mvPosition;`);
+  };
+  const beadMesh = new THREE.InstancedMesh(beadGeo, beadMat, beads.length);
+  {
+    const bm = new THREE.Matrix4();
+    beads.forEach((b, i) => beadMesh.setMatrixAt(i, bm.makeTranslation(b.p.x, b.p.y, b.p.z)));
+  }
+  beadMesh.frustumCulled = false;
+  beadMesh.raycast = () => {};
+  heroGroup.add(beadMesh);
+  let energyTarget = 1, heroHover = false, flash = 0;
 
   // ----- 물리: 양 끝을 화면 밖 대각선 위아래에 고정한 체인 -----
   const world = new CANNON.World({ gravity: new CANNON.Vec3(0, GRAVITY, 0) });
@@ -257,8 +617,7 @@ flat varying float vHatchP, vChromeP;`)
     W = canvas.clientWidth || 1;
     H = canvas.clientHeight || 1;
     renderer.setSize(W, H, false);
-    morph.uPR.value = renderer.getPixelRatio();
-    camera.aspect = W / H;
+    morph.uPR.value = renderer.getPixelRatio();    camera.aspect = W / H;
     camera.updateProjectionMatrix();
     portrait = W / H < 0.9;
     const angle = portrait ? 64 : 30;
@@ -277,7 +636,9 @@ flat varying float vHatchP, vChromeP;`)
 
   // 처음엔 고리 2~3개만 화면을 채우는 클로즈업, 제목이 올라오는 동안 오른쪽으로 물러나며 조금 멀어진다
   // 첫 진입: 멀리서 서서히 밝아지며 클로즈업까지 다가온다
-  const introStart = performance.now();
+  // 인트로 시계: 실제 경과 시간이 아니라 '그려진 프레임'의 시간(프레임당 최대 1/30초)만 센다 —
+  // 새로고침 직후 셰이더 컴파일·텍스처 업로드로 화면이 잠깐 멈춰도 그 사이 인트로가 건너뛰어 중간부터 보이지 않게 한다
+  let introClock = 0;
   let buildT = reduceMotion ? 1 : 0;
   const span01 = (t, [a, b]) => clamp01((t - a) / (b - a));
   const physicsOn = () => buildT >= T.physics;
@@ -318,7 +679,7 @@ flat varying float vHatchP, vChromeP;`)
     camera.up.copy(camUp);
     camera.lookAt(camLook);
     camera.updateMatrixWorld();
-    const fade = clamp01((performance.now() - introStart) / 500);
+    const fade = reduceMotion ? 1 : clamp01(introClock / 0.5);
     const o = ((portrait ? 0.32 : 1) * fade).toFixed(3);
     canvas.style.opacity = o;
     penSvg.style.opacity = o;
@@ -456,12 +817,13 @@ flat varying float vHatchP, vChromeP;`)
     morph.uChrome.value = smooth(span01(buildT, T.chrome)) * 1.04;
     morph.uInflate.value = smooth(span01(buildT, T.inflate));
     morph.uWave.value = span01(buildT, T.wave);
+    morph.uSet.value = span01(buildT, T.set) * 1.05;
   }
   // 시간이 흐르면 저절로, 스크롤하면 앞당겨 진행 — 한 번 만든 철은 되돌아가지 않고, 크게 건너뛰어도 1.2초 이상에 걸쳐 따라간다
   let buildFrozen = false;
   function advanceBuild(dt) {
     if (buildT >= 1 || buildFrozen) return;
-    const byTime = (performance.now() - introStart) / BUILD_MS;
+    const byTime = (introClock * 1000) / BUILD_MS;
     const pinned = document.documentElement.classList.contains('hero-pinned');
     const byScroll = pinned ? progress() / 0.3 : 0;
     const target = Math.min(1, Math.max(byTime, byScroll));
@@ -488,8 +850,12 @@ flat varying float vHatchP, vChromeP;`)
   }
   function hitLink() {
     mesh.computeBoundingSphere();
-    const hit = raycaster.intersectObject(mesh, false)[0];
-    return hit && hit.instanceId !== undefined ? hit : null;
+    const hit = raycaster.intersectObjects([mesh, heroTube], false)[0];
+    if (!hit) return null;
+    if (hit.object === heroTube) hit.index = MID;
+    else if (hit.instanceId !== undefined) hit.index = OTHERS[hit.instanceId];
+    else return null;
+    return hit;
   }
 
   addEventListener('pointermove', (e) => {
@@ -516,7 +882,7 @@ flat varying float vHatchP, vChromeP;`)
       const dtm = Math.max((now - nudgeAt) / 1000, 1 / 120);
       const hit = hitLink();
       if (hit) {
-        const b = links[hit.instanceId];
+        const b = links[hit.index];
         let vx = (hitPt.x - lastNudge.x) / dtm, vy = (hitPt.y - lastNudge.y) / dtm, vz = (hitPt.z - lastNudge.z) / dtm;
         const sp = Math.hypot(vx, vy, vz);
         if (sp > NUDGE_MAX_SPEED) { const s = NUDGE_MAX_SPEED / sp; vx *= s; vy *= s; vz *= s; }
@@ -532,7 +898,8 @@ flat varying float vHatchP, vChromeP;`)
     if (e.button !== 0 || !visible || !physicsOn() || interactive(e.target) || !setRay(e)) return;
     const hit = hitLink();
     if (!hit) return;
-    const body = links[hit.instanceId];
+    const body = links[hit.index];
+    if (hit.index === MID) flash = 1;
     const at = new CANNON.Vec3(hit.point.x, hit.point.y, hit.point.z);
     if (e.pointerType === 'touch') {
       body.applyImpulse(new CANNON.Vec3(perp.x * 22 * IMPULSE * (Math.random() < 0.5 ? -1 : 1), perp.y * 22 * IMPULSE, (Math.random() - 0.5) * 18 * IMPULSE), at);
@@ -675,19 +1042,33 @@ flat varying float vHatchP, vChromeP;`)
 
   const dummy = new THREE.Object3D();
   function sync() {
-    for (let i = 0; i < links.length; i++) {
-      const b = links[i];
+    OTHERS.forEach((li, k) => {
+      const b = links[li];
       dummy.position.set(b.position.x, b.position.y, b.position.z);
       dummy.quaternion.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
       dummy.updateMatrix();
-      mesh.setMatrixAt(i, dummy.matrix);
-    }
+      mesh.setMatrixAt(k, dummy.matrix);
+    });
     mesh.instanceMatrix.needsUpdate = true;
+    const h = links[MID];
+    heroGroup.position.set(h.position.x, h.position.y, h.position.z);
+    heroGroup.quaternion.set(h.quaternion.x, h.quaternion.y, h.quaternion.z, h.quaternion.w);
+  }
+
+  // 빛줄기는 늘 흐르고, 올리면 세지고(1.9배), 잡는 순간 번쩍였다가 가라앉는다. 움직임 줄이기 설정이면 멈춘 한 장면으로 둔다
+  function updateHeroFx(elapsed) {
+    const dt = Math.min(elapsed, 0.1);
+    if (!reduceMotion) heroFx.uTime.value += dt;
+    else heroFx.uTime.value = 2.2;
+    energyTarget = drag && links.indexOf(drag.c.bodyA) === MID ? 2.4 : heroHover ? 1.9 : 1;
+    flash = Math.max(0, flash - dt * 1.6);
+    const e = heroFx.uEnergy.value;
+    heroFx.uEnergy.value = e + (energyTarget + flash * 2.5 - e) * (1 - Math.exp(-dt / 0.18));
   }
 
   let needsRender = true, last = performance.now(), frame = 0;
   layout();
-  if (/chaindebug/.test(location.search)) window.__chain = { get links() { return links; }, limits, simulate, perp, anchorA, anchorB, setBuild: (v) => { buildT = v; buildFrozen = v !== null; }, get buildT() { return buildT; }, morph, world, CANNON, dragBody, snap: () => { renderer.render(scene, camera); return canvas.toDataURL(); } };
+  if (/chaindebug/.test(location.search)) window.__chain = { get links() { return links; }, limits, simulate, perp, anchorA, anchorB, setBuild: (v) => { buildT = v; buildFrozen = v !== null; }, get buildT() { return buildT; }, morph, heroFx, heroGroup, heroTube, stoneMesh, beadMesh, stoneU, renderer, world, CANNON, dragBody, snap: () => { sync(); updateMorph(); trackChain(10); placeCamera(); renderer.render(scene, camera); return canvas.toDataURL(); } };
   if (reduceMotion) {
     for (let i = 0; i < 360; i++) simulate(1 / 120);
   } else {
@@ -701,22 +1082,31 @@ flat varying float vHatchP, vChromeP;`)
     const dt = Math.min(elapsed, 1 / 30);
     last = now;
     if (document.hidden || !visible) return;
-    advanceBuild(elapsed);
+    introClock += dt;
+    advanceBuild(dt);
     if (!reduceMotion) {
       if (physicsOn()) simulate(dt);
       sync();
       needsRender = true;
     }
     updateMorph();
+    updateHeroFx(elapsed);
     trackChain(reduceMotion ? 10 : elapsed);
     placeCamera();
     updatePen();
     if (hoverDirty && !drag && physicsOn() && ++frame % 3 === 0) {
       hoverDirty = false;
-      const over = !pointerOverUi && !!hitLink();
+      const hit = pointerOverUi ? null : hitLink();
+      const over = !!hit;
+      heroHover = !!hit && hit.index === MID;
       if (over !== hovering) { hovering = over; document.documentElement.classList.toggle('chain-hover', over); }
     }
     if (needsRender) { renderer.render(scene, camera); needsRender = false; }
   }
-  requestAnimationFrame(loop);
+  // 무거운 셰이더(다이아몬드 광선 추적 등)를 먼저 다 컴파일해 두고 시작 — 첫 프레임이 멈칫하지 않는다
+  placeCamera();
+  renderer.compileAsync(scene, camera).catch(() => {}).then(() => {
+    last = performance.now();
+    requestAnimationFrame(loop);
+  });
 }
