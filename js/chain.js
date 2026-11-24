@@ -12,9 +12,11 @@ const MID = (N / 2) | 0; // 펜으로 그려지는 첫 고리 — 짝수 번째�
 const BUILD_MS = 6200;
 const T = {
   outer: [0.03, 0.30], hop: [0.30, 0.34], inner: [0.34, 0.50],
-  hatch: [0.50, 0.66], chrome: [0.64, 0.84], inflate: [0.62, 0.82],
-  lineFade: [0.66, 0.78], wave: [0.80, 1.0], camera: [0.78, 1.0], physics: 0.80,
-  set: [0.82, 0.98], // 가운데 고리에 다이아몬드가 박히는 구간
+  hatch: [0.50, 0.66],
+  // 빗금이 다 채워지면 고리 전체가 빛을 머금었다가(glowIn) 번쩍인 뒤 빛이 걷히며(glowOut) 실물이 한 번에 드러난다
+  glowIn: [0.645, 0.695], glowOut: [0.70, 0.775], chrome: [0.685, 0.72], inflate: [0.675, 0.72],
+  lineFade: [0.66, 0.72], wave: [0.80, 1.0], camera: [0.78, 1.0], physics: 0.80,
+  set: [0.715, 0.75], // 가운데 고리의 다이아몬드·발이 한꺼번에 박히는 구간
 };
 // 무게감: 고리 하나가 약 1.9 단위 — 실제 크기로 치면 중력이 훨씬 세야 '무거운 쇠'로 보인다(약하면 달 위처럼 둥실 뜬다).
 // 그래서 중력을 크게 두어 놓으면 툭 떨어지고 축 늘어지며, 질량도 커서 쳐도 조금만 밀리고 금방 제자리로 쳐진다
@@ -309,7 +311,7 @@ function init() {
   const delays = new Float32Array(OTHERS.map((i) => Math.abs(i - MID) * 0.15));
   geometry.setAttribute('aDelay', new THREE.InstancedBufferAttribute(delays, 1));
   const morph = {
-    uHatch: { value: 0 }, uChrome: { value: 0 }, uInflate: { value: 0 }, uWave: { value: 0 }, uSet: { value: 0 },
+    uHatch: { value: 0 }, uChrome: { value: 0 }, uInflate: { value: 0 }, uWave: { value: 0 }, uSet: { value: 0 }, uGlow: { value: 0 },
     uPR: { value: 1 },
     uFill: { value: new THREE.Vector3(0x0e / 255, 0x12 / 255, 0x1a / 255) },
     uLine: { value: new THREE.Vector3(0x5a / 255, 0xa6 / 255, 0xff / 255) },
@@ -321,15 +323,17 @@ function init() {
       .replace('#include <common>', `#include <common>
 attribute float aU;
 ${hero ? '' : 'attribute float aDelay;'}
-uniform float uHatch, uChrome, uInflate, uWave;
+uniform float uHatch, uChrome, uInflate, uWave, uGlow;
 varying float vU;
-flat varying float vHatchP, vChromeP;`)
+flat varying float vHatchP, vChromeP, vGlowP;`)
       .replace('#include <beginnormal_vertex>', `float inflateP;
-${hero ? 'vHatchP = uHatch; vChromeP = uChrome; inflateP = uInflate;' : `
+${hero ? 'vHatchP = uHatch; vChromeP = uChrome; vGlowP = uGlow; inflateP = uInflate;' : `
 float w = clamp((uWave - aDelay) / 0.4, 0.0, 1.0);
 vHatchP = w > 0.0 ? 1.01 : -1.0;
-vChromeP = smoothstep(0.2, 0.9, w) * 1.04;
-inflateP = smoothstep(0.15, 0.85, w);`}
+// 나머지 고리도 각자 통째로 번쩍이며 바뀐다(물결처럼 차례로)
+vGlowP = exp(-pow((w - 0.45) / 0.2, 2.0));
+vChromeP = smoothstep(0.38, 0.62, w);
+inflateP = smoothstep(0.33, 0.67, w);`}
 // 완전히 0이면 삼각형이 선처럼 찌그러져 보간 오차가 점으로 새어 나온다 — 정면에선 보이지 않을 만큼의 두께를 남긴다
 inflateP = max(inflateP, 0.03);
 vU = aU;
@@ -342,19 +346,21 @@ transformed.z *= inflateP;`);
 uniform float uPR;
 uniform vec3 uFill, uLine;
 varying float vU;
-flat varying float vHatchP, vChromeP;`)
+flat varying float vHatchP, vChromeP, vGlowP;`)
       .replace('void main() {', `void main() {
   if (vHatchP <= 0.0 || vU >= vHatchP) discard;`)
       .replace('#include <dithering_fragment>', `#include <dithering_fragment>
-  float edge = vChromeP;
-  float chromeAmt = 1.0 - smoothstep(edge - 0.012, edge, vU);
+  // 실물(금속)은 위치와 상관없이 고리 전체가 한 번에 드러난다
+  float chromeAmt = clamp(vChromeP, 0.0, 1.0);
   vec2 fc = gl_FragCoord.xy / uPR;
   float d = abs(fract((fc.x + fc.y) / 11.0) - 0.5) * 11.0;
   float line = 1.0 - smoothstep(0.7, 1.6, d);
-  vec3 flatCol = mix(uFill, uLine, line);
-  float seam = edge > 0.001 && edge < 1.0 ? exp(-abs(vU - edge) * 90.0) : 0.0;
+  // 충전: 빗금선과 바탕이 점점 빛을 머금고 → 번쩍: 고리 전체가 흰 푸른빛에 잠겼다가 걷히면 실물이 남는다
+  vec3 glowCol = vec3(0.62, 0.82, 1.0);
+  vec3 flatCol = mix(uFill + glowCol * vGlowP * 0.3, uLine + glowCol * vGlowP * 1.1, line);
   float front = vHatchP < 1.0 ? exp(-abs(vU - vHatchP) * 160.0) : 0.0;
-  gl_FragColor.rgb = mix(flatCol, gl_FragColor.rgb, chromeAmt) + (seam * 0.9 + front * 0.6) * vec3(0.55, 0.78, 1.0);
+  // 번쩍임은 실물이 드러난 뒤엔 덜 덮어, 빛 속으로 금속 결이 비쳐 보이게 한다
+  gl_FragColor.rgb = mix(flatCol, gl_FragColor.rgb, chromeAmt) + glowCol * (pow(vGlowP, 1.6) * mix(0.95, 0.45, chromeAmt) + front * 0.6);
   gl_FragColor.a = 1.0;`);
   }
   material.onBeforeCompile = (sh) => patchMorph(sh);
@@ -423,8 +429,8 @@ varying mat4 vM, vMinv;
 flat varying vec3 vFacet;
 flat varying float vSeed;
 void main() {
-  // 고리가 다 부풀어 금속이 된 뒤, 펜이 그린 순서대로 돌이 톡톡 박힌다(uSet). 납작함(uInflate)도 고리와 똑같이 따른다
-  float reveal = smoothstep(aU - 0.005, aU + 0.03, uSet);
+  // 빛이 걷히며 고리가 실물이 되는 순간, 모든 돌이 한꺼번에 박힌다(uSet). 납작함(uInflate)도 고리와 똑같이 따른다
+  float reveal = uSet;
   mat4 m = modelMatrix * instanceMatrix;
   vM = m;
   vMinv = inverse(m);
@@ -528,7 +534,7 @@ void main() {
 attribute float aU;
 uniform float uSet, uInflate;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
-transformed *= smoothstep(aU - 0.005, aU + 0.03, uSet);`)
+transformed *= uSet;`)
       .replace('#include <project_vertex>', `vec4 mvPosition = vec4(transformed, 1.0);
 #ifdef USE_INSTANCING
 mvPosition = instanceMatrix * mvPosition;
@@ -545,7 +551,7 @@ gl_Position = projectionMatrix * mvPosition;`);
   beadMesh.frustumCulled = false;
   beadMesh.raycast = () => {};
   heroGroup.add(beadMesh);
-  let energyTarget = 1, heroHover = false, flash = 0;
+  let energyTarget = 1, heroHover = false, flash = 0, setFlashed = false;
 
   // ----- 물리: 양 끝을 화면 밖 대각선 위아래에 고정한 체인 -----
   const world = new CANNON.World({ gravity: new CANNON.Vec3(0, GRAVITY, 0) });
@@ -814,10 +820,11 @@ gl_Position = projectionMatrix * mvPosition;`);
   }
   function updateMorph() {
     morph.uHatch.value = span01(buildT, T.hatch) * 1.001;
-    morph.uChrome.value = smooth(span01(buildT, T.chrome)) * 1.04;
+    morph.uChrome.value = smooth(span01(buildT, T.chrome));
+    morph.uGlow.value = smooth(span01(buildT, T.glowIn)) * (1 - smooth(span01(buildT, T.glowOut)));
     morph.uInflate.value = smooth(span01(buildT, T.inflate));
     morph.uWave.value = span01(buildT, T.wave);
-    morph.uSet.value = span01(buildT, T.set) * 1.05;
+    morph.uSet.value = smooth(span01(buildT, T.set));
   }
   // 시간이 흐르면 저절로, 스크롤하면 앞당겨 진행 — 한 번 만든 철은 되돌아가지 않고, 크게 건너뛰어도 1.2초 이상에 걸쳐 따라간다
   let buildFrozen = false;
@@ -1060,6 +1067,8 @@ gl_Position = projectionMatrix * mvPosition;`);
     const dt = Math.min(elapsed, 0.1);
     if (!reduceMotion) heroFx.uTime.value += dt;
     else heroFx.uTime.value = 2.2;
+    // 빛이 걷히며 다이아몬드가 박히는 순간 한 번 번쩍 반짝인다
+    if (!setFlashed && buildT >= T.set[0]) { setFlashed = true; flash = 1; }
     energyTarget = drag && links.indexOf(drag.c.bodyA) === MID ? 2.4 : heroHover ? 1.9 : 1;
     flash = Math.max(0, flash - dt * 1.6);
     const e = heroFx.uEnergy.value;
